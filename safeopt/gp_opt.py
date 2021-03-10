@@ -1297,6 +1297,7 @@ class GoSafe(SafeOpt):
         self.M = self.S[self.x_0_idx].copy()
         self.safe_states=self.S.copy()
 
+        #Used to make modifications on GoSafe, currently unimplemented
         self.extensions=extensions
         self.x_0 = x_0
         self.constraint_bounds=constraint_bounds
@@ -1319,8 +1320,9 @@ class GoSafe(SafeOpt):
         # Update context to current setting
         self.context = context
 
-        # Iterate over all functions
-        if self.constraint_bounds and not self.Q_empty: #If Q has been updated once and we want to constraint our bounds
+
+        if self.constraint_bounds and not self.Q_empty: #If Q has been updated once and we want to constrain our bounds
+            # Iterate over all functions
             for i in range(len(self.gps)):
                 # Evaluate acquisition function
                 mean, var = self.gps[i].predict_noiseless(self.inputs)
@@ -1333,6 +1335,7 @@ class GoSafe(SafeOpt):
                 self.Q[:, 2 * i + 1] = np.min(self.Q[:, 2 * i + 1] ,mean + beta * std_dev)
 
         else:
+            # Iterate over all functions
             for i in range(len(self.gps)):
                 # Evaluate acquisition function
                 mean, var = self.gps[i].predict_noiseless(self.inputs)
@@ -1364,7 +1367,7 @@ class GoSafe(SafeOpt):
         # Update safe set
         self.compute_safe_set()
 
-        # Reference to confidence intervals
+        # Reference to confidence intervals, gets l(a,x,0), u(a,x,0)
         l, u = self.Q[:, :2].T
 
         if not np.any(self.S):
@@ -1529,6 +1532,7 @@ class GoSafe(SafeOpt):
             self.G[:] = False
             self.M[:] = False
             s = np.logical_not(self.x_0_idx) #Consider all IC which are not x_0
+            #Check if we should do S2: the variance for any potential query point is greater than epsilon
             var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling, axis=1)
             do_S2=np.any(var_G>=self.eps)
 
@@ -1565,8 +1569,8 @@ class GoSafe(SafeOpt):
                     #         if not G_safe[index]:
                     #             break
                     # else:
-                        # Check if expander for all GPs
-                    for i, gp in enumerate(self.gps):
+                        # Check if expander for all GPs (only consider the constraints)
+                    for i, gp in enumerate(self.gps[start_constraint:num_constraints]):
                         # Skip evlauation if 'no' safety constraint
                         if self.fmin[i] == -np.inf:
                             continue
@@ -1603,26 +1607,34 @@ class GoSafe(SafeOpt):
 
                 # Update safe set (if full_sets is False this is at most one point
                 self.G[s] = G_safe
+                #Check for the set G if we are uncertain about any point, if yes do S2.
                 do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) >= self.eps)
                 if do_S2:
                     return
 
+            #S3
             elif not do_S2:
                 self.G[:] = False
                 self.M[:] = False
                 self.criterion="S3"
 
+                #Function defined to get indexes of all safe sets in the parameter set.
+                ## states represents a unique vector of all distinct safe states
                 def get_safe_state_idx(states):
                     safe_state_idx = np.zeros(self.inputs.shape[0], dtype=np.bool)
+                    #Loop over all unique states
                     for state in states:
+                        #Check which indices are associated with safe states
                         idx = np.where(np.sum(self.inputs[self.S, self.state_idx] == state,axis=1)==len(self.state_idx))
                         safe_state_idx[idx] = True
 
+                    #Vector returns all parameter combinations associated with safe states
                     return safe_state_idx
 
                     # Find all states for which we have a safe action
-
-                safe_states = np.unique(self.inputs[self.S, self.state_idx])
+                #Get all states that are unique in the Safe set
+                safe_states=self.inputs[self.S, :]
+                safe_states = np.unique(safe_states[:,self.state_idx],axis=0)
                 self.safe_states = get_safe_state_idx(safe_states)
 
 
