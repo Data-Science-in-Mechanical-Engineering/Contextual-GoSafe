@@ -371,11 +371,11 @@ class SafeOpt(GaussianProcessOptimization):
             self.liptschitz = np.atleast_1d(
                 np.asarray(self.liptschitz).squeeze())
 
-        # Value intervals
+        # Value intervals-initialized as empty Q.shape()  (# num parameters combinations, 2*(1+#num_constraints)
         self.Q = np.empty((self.inputs.shape[0], 2 * len(self.gps)),
                           dtype=np.float)
 
-        # Safe set
+        # Safe set initialized as 0s
         self.S = np.zeros(self.inputs.shape[0], dtype=np.bool)
 
         # Switch to use confidence intervals for safety
@@ -1195,7 +1195,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
 
 
 
-class GoSafe(GaussianProcessOptimization):
+class GoSafe(SafeOpt):
     """A class for Safe Bayesian Optimization.
 
     This class implements the `SafeOpt` algorithm. It uses a Gaussian
@@ -1270,60 +1270,33 @@ class GoSafe(GaussianProcessOptimization):
     >>> opt.add_new_data_point(next_parameters, performance)
     """
 
-    def __init__(self, gp, parameter_set, fmin,x_0,lipschitz=None, beta=2,
+    def __init__(self, gp, parameter_set, fmin,x_0, beta=2,
                  num_contexts=0, threshold=0, scaling='auto',extensions=False,constraint_bounds=False,eps=0.1):
         """Initialization, see `SafeOpt`."""
         super(GoSafe, self).__init__(gp,
+                                      parameter_set=parameter_set,
                                       fmin=fmin,
+                                      lipschitz=None,
                                       beta=beta,
                                       num_contexts=num_contexts,
                                       threshold=threshold,
                                       scaling=scaling)
 
-        # Index of state parameter
-        state_size=np.shape(x_0)[0]
-
-        self.state_idx=list(range(parameter_set.shape[1]-state_size,parameter_set.shape[1]))
-        #print(self.state_idx)
-        self.x_0_idx =np.sum(parameter_set[:,self.state_idx]==x_0,axis=1)==state_size
+        # Dimension of state
+        state_dim=np.shape(x_0)[0]
+        #Indexes where states are stored in the input vector
+        self.state_idx=list(range(parameter_set.shape[1]-state_dim,parameter_set.shape[1]))
+        #All combinations with initial condition x_0
+        self.x_0_idx =np.sum(parameter_set[:,self.state_idx]==x_0,axis=1)==state_dim
         if not np.any(self.x_0_idx):
             raise AssertionError("Initial state x_0 not in parameter set")
 
-        if self.num_contexts > 0:
-            context_shape = (parameter_set.shape[0], self.num_contexts)
-            self.inputs = np.hstack((parameter_set,
-                                     np.zeros(context_shape,
-                                              dtype=parameter_set.dtype)))
-            self.parameter_set = self.inputs[:, :-self.num_contexts]
-        else:
-            self.inputs = self.parameter_set = parameter_set
 
-        self.liptschitz = lipschitz
 
-        if self.liptschitz is not None:
-            if not isinstance(self.liptschitz, list):
-                self.liptschitz = [self.liptschitz] * len(self.gps)
-            self.liptschitz = np.atleast_1d(
-                np.asarray(self.liptschitz).squeeze())
-
-        # Value intervals-initialized as empty Q.shape()  (# num parameters combinations, 2*(1+#num_constraints)
-        self.Q = np.empty((self.inputs.shape[0], 2 * len(self.gps)),
-                          dtype=np.float)
-
-        # Safe set-initialized as 0s
-        self.S = np.zeros(self.inputs.shape[0], dtype=np.bool)
-
-        # Switch to use confidence intervals for safety
-        if lipschitz is None:
-            self._use_lipschitz = False
-        else:
-            self._use_lipschitz = True
-
-        # Set of expanders and maximizers
-        self.G = self.S.copy()
         #Only need M for IC x_0
         self.M = self.S[self.x_0_idx].copy()
         self.safe_states=self.S.copy()
+
         self.extensions=extensions
         self.x_0 = x_0
         self.constraint_bounds=constraint_bounds
@@ -1332,68 +1305,6 @@ class GoSafe(GaussianProcessOptimization):
         self.criterion="S1" #Which step we are running at the moment
         self.eps=eps #Defined to switch between S1,S2,S3
 
-
-    @property
-    def use_lipschitz(self):
-        """
-        Boolean that determines whether to use the Lipschitz constant.
-
-        By default this is set to False, which means the adapted SafeOpt
-        algorithm is used, that uses the GP confidence intervals directly.
-        If set to True, the `self.lipschitz` parameter is used to compute
-        the safe and expanders sets.
-        """
-        return self._use_lipschitz
-
-    @use_lipschitz.setter
-    def use_lipschitz(self, value):
-        if value and self.liptschitz is None:
-            raise ValueError('Lipschitz constant not defined')
-        self._use_lipschitz = value
-
-    @property
-    def parameter_set(self):
-        """Discrete parameter samples for Bayesian optimization."""
-        return self._parameter_set
-
-    @parameter_set.setter
-    def parameter_set(self, parameter_set):
-        self._parameter_set = parameter_set
-
-        # Plotting bounds (min, max value
-        self.bounds = list(zip(np.min(self._parameter_set, axis=0),
-                               np.max(self._parameter_set, axis=0)))
-        self.num_samples = [len(np.unique(self._parameter_set[:, i]))
-                            for i in range(self._parameter_set.shape[1])]
-
-    @property
-    def context_fixed_inputs(self):
-        """Return the fixed inputs for the current context."""
-        n = self.gp.input_dim - 1
-        nc = self.num_contexts
-        if nc > 0:
-            contexts = self.inputs[0, -self.num_contexts:]
-            return list(zip(range(n, n - nc, -1), contexts))
-
-    @property
-    def context(self):
-        """Return the current context variables."""
-        if self.num_contexts:
-            return self.inputs[0, -self.num_contexts:]
-
-    @context.setter
-    def context(self, context):
-        """Set the current context and update confidence intervals.
-
-        Parameters
-        ----------
-        context: ndarray
-            New context that should be applied to the input parameters
-        """
-        if self.num_contexts:
-            if context is None:
-                raise ValueError('Need to provide value for context.')
-            self.inputs[:, -self.num_contexts:] = context
 
     def update_confidence_intervals(self, context=None):
         """Recompute the confidence intervals form the GP.
@@ -1434,11 +1345,6 @@ class GoSafe(GaussianProcessOptimization):
                 self.Q[:, 2 * i + 1] = mean + beta * std_dev
 
                 self.Q_empty=False
-
-    def compute_safe_set(self):
-        """Compute only the safe set based on the current confidence bounds."""
-        # Update safe set -> Looks at lower bound and checks if lower bound > self.fmin
-        self.S[:] = np.all(self.Q[:, ::2] > self.fmin, axis=1)
 
     def compute_sets(self, full_sets=False):
         """
@@ -1508,16 +1414,18 @@ class GoSafe(GaussianProcessOptimization):
                     max_var)
             s[s] = np.any(u[s, :] - l[s, :] > self.threshold*beta, axis=1) #If any point has a minimal variance of thresshold
 
-            #Check if we should apply S1 for case G is empty and G is nonempty
+            #Check if we should apply S1
             if not np.any(s):
+                #If we have no candidates for G but we are uncertain about some points in M_n, apply S1
                 if max_var >= self.eps:
                     self.criterion = "S1"
                     return
                 else:
                     do_S1=False
+            #If we have candidates for G
             else:
-
-                do_S1=np.max((np.max((u[s, :] - l[s, :]) / self.scaling,axis=1) )>= self.eps)
+                #Check if we are uncertain about any of our candidates, if yes apply S1
+                do_S1=np.any((np.max((u[s, :] - l[s, :]) / self.scaling,axis=1) )>= self.eps)
                 # no need to evaluate any points as expanders in G, exit
              #   return
 
@@ -1529,13 +1437,12 @@ class GoSafe(GaussianProcessOptimization):
         if do_S1:
             #Update criterion for querying point
             self.criterion = "S1"
-            #If there is any point in G_n which would be sampled next -> Update G, else leave it to False
 
             # set of safe expanders
             G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
 
             if not full_sets:
-                # Sort, element with largest variance first for fixed x_0
+                # Sort, element with largest variance first for fixed x_0 (maximum is taken along gp's dim)
                 sort_index = sort_generator(np.max(u[s, :] - l[s, :],
                                                    axis=1))
             else:
@@ -1548,27 +1455,117 @@ class GoSafe(GaussianProcessOptimization):
 
 
             for index in sort_index:
-                if self.use_lipschitz:
-                    # Distance between current index point and all other unsafe
-                    # points
-                    d = cdist(self.inputs[s, :][[index], :],
-                              self.inputs[~self.S, :])
+                # if self.use_lipschitz:
+                #     # Distance between current index point and all other unsafe
+                #     # points
+                #     d = cdist(self.inputs[s, :][[index], :],
+                #               self.inputs[~self.S, :])
+                #
+                #     # Check if expander for all GPs
+                #     for i in range(len(self.gps)):
+                #         # Skip evaluation if 'no' safety constraint
+                #         if self.fmin[i] == -np.inf:
+                #             continue
+                #         # Safety: u - L * d >= fmin
+                #         G_safe[index] =\
+                #             np.any(u[s, i][index] - self.liptschitz[i] * d >=
+                #                    self.fmin[i])
+                #         # Stop evaluating if not expander according to one
+                #         # safety constraint
+                #         if not G_safe[index]:
+                #             break
+                # else:
+                    # Check if expander for all GPs
+                for i, gp in enumerate(self.gps):
+                    # Skip evlauation if 'no' safety constraint
+                    if self.fmin[i] == -np.inf:
+                        continue
 
-                    # Check if expander for all GPs
-                    for i in range(len(self.gps)):
-                        # Skip evaluation if 'no' safety constraint
-                        if self.fmin[i] == -np.inf:
-                            continue
-                        # Safety: u - L * d >= fmin
-                        G_safe[index] =\
-                            np.any(u[s, i][index] - self.liptschitz[i] * d >=
-                                   self.fmin[i])
-                        # Stop evaluating if not expander according to one
-                        # safety constraint
-                        if not G_safe[index]:
-                            break
+                    # Add safe point with its max possible value to the gp
+                    self._add_data_point(gp=gp,
+                                         x=self.parameter_set[s, :][index, :],
+                                         y=u[s, i][index],
+                                         context=self.context)
+
+                    mean2, var2 = gp.predict_noiseless(self.inputs[unsafe_points])
+
+                    # Remove the fake data point from the GP again
+                    self._remove_last_data_point(gp=gp)
+
+                    mean2 = mean2.squeeze()
+                    var2 = var2.squeeze()
+                    l2 = mean2 - beta * np.sqrt(var2)
+
+                    # If any unsafe lower bound is suddenly above fmin then
+                    # the point is an expander
+                    G_safe[index] = np.any(l2 >= self.fmin[i])
+
+                    # Break if one safety GP is not an expander
+                    if not G_safe[index]:
+                        break
+
+                # Since we sorted by uncertainty and only the most
+                # uncertain element gets picked by SafeOpt anyways, we can
+                # stop after we found the first one
+                if G_safe[index] and not full_sets:
+                    break
+
+            # Update safe set (if full_sets is False this is at most one point
+            self.G[s] = G_safe
+            del unsafe_points
+
+            do_S1 = np.any((np.max((u[self.G, :] - l[self.G, :]) / self.scaling, axis=1)) >= self.eps)
+
+            if do_S1:
+                return
+
+        elif not do_S1: #If we do not do S1, we do S2 or S3
+
+            # Get the indexes corresponding to constraints as in S2 we are only considering expansions
+            num_constraints = len(self.gps)
+            # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
+            start_constraint = (self.fmin[0] == None) * 1
+
+            self.G[:] = False
+            self.M[:] = False
+            s = np.logical_not(self.x_0_idx) #Consider all IC which are not x_0
+            var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling, axis=1)
+            do_S2=np.any(var_G>=self.eps)
+
+
+
+            if do_S2:
+                self.criterion="S2"
+                G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
+
+                if not full_sets:
+                    sort_index = sort_generator(np.max(u[s, :] - l[s, :],
+                                                       axis=1))
                 else:
-                    # Check if expander for all GPs
+                    sort_index = range(len(G_safe))
+
+                for index in sort_index:
+                    # if self.use_lipschitz:
+                    #     # Distance between current index point and all other unsafe
+                    #     # points
+                    #     d = cdist(self.inputs[s, :][[index], :],
+                    #               self.inputs[~self.S, :])
+                    #
+                    #     # Check if expander for all GPs
+                    #     for i in range(len(self.gps)):
+                    #         # Skip evaluation if 'no' safety constraint
+                    #         if self.fmin[i] == -np.inf:
+                    #             continue
+                    #         # Safety: u - L * d >= fmin
+                    #         G_safe[index] =\
+                    #             np.any(u[s, i][index] - self.liptschitz[i] * d >=
+                    #                    self.fmin[i])
+                    #         # Stop evaluating if not expander according to one
+                    #         # safety constraint
+                    #         if not G_safe[index]:
+                    #             break
+                    # else:
+                        # Check if expander for all GPs
                     for i, gp in enumerate(self.gps):
                         # Skip evlauation if 'no' safety constraint
                         if self.fmin[i] == -np.inf:
@@ -1580,7 +1577,8 @@ class GoSafe(GaussianProcessOptimization):
                                              y=u[s, i][index],
                                              context=self.context)
 
-                        mean2, var2 = gp.predict_noiseless(self.inputs[unsafe_points])
+                        # Prediction of previously unsafe points based on that
+                        mean2, var2 = gp.predict_noiseless(self.inputs[~self.S])
 
                         # Remove the fake data point from the GP again
                         self._remove_last_data_point(gp=gp)
@@ -1597,86 +1595,6 @@ class GoSafe(GaussianProcessOptimization):
                         if not G_safe[index]:
                             break
 
-                # Since we sorted by uncertainty and only the most
-                # uncertain element gets picked by SafeOpt anyways, we can
-                # stop after we found the first one
-                if G_safe[index] and not full_sets:
-                    break
-
-            # Update safe set (if full_sets is False this is at most one point
-            self.G[s] = G_safe
-            del unsafe_points
-            return
-
-        else: #If we do not do S1, we do S2 or S3
-
-            self.G[:] = False
-            self.M[:] = False
-            s = np.logical_not(self.x_0_idx) #Consider all IC which are not x_0
-            var_G = np.max((u[s, :] - l[s, :]) / self.scaling, axis=1)
-            do_S2=np.any(var_G>=self.eps)
-
-            if do_S2:
-                self.criterion="S2"
-                G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
-
-                if not full_sets:
-                    sort_index = sort_generator(np.max(u[s, :] - l[s, :],
-                                                       axis=1))
-                else:
-                    sort_index = range(len(G_safe))
-
-                for index in sort_index:
-                    if self.use_lipschitz:
-                        # Distance between current index point and all other unsafe
-                        # points
-                        d = cdist(self.inputs[s, :][[index], :],
-                                  self.inputs[~self.S, :])
-
-                        # Check if expander for all GPs
-                        for i in range(len(self.gps)):
-                            # Skip evaluation if 'no' safety constraint
-                            if self.fmin[i] == -np.inf:
-                                continue
-                            # Safety: u - L * d >= fmin
-                            G_safe[index] =\
-                                np.any(u[s, i][index] - self.liptschitz[i] * d >=
-                                       self.fmin[i])
-                            # Stop evaluating if not expander according to one
-                            # safety constraint
-                            if not G_safe[index]:
-                                break
-                    else:
-                        # Check if expander for all GPs
-                        for i, gp in enumerate(self.gps):
-                            # Skip evlauation if 'no' safety constraint
-                            if self.fmin[i] == -np.inf:
-                                continue
-
-                            # Add safe point with its max possible value to the gp
-                            self._add_data_point(gp=gp,
-                                                 x=self.parameter_set[s, :][index, :],
-                                                 y=u[s, i][index],
-                                                 context=self.context)
-
-                            # Prediction of previously unsafe points based on that
-                            mean2, var2 = gp.predict_noiseless(self.inputs[~self.S])
-
-                            # Remove the fake data point from the GP again
-                            self._remove_last_data_point(gp=gp)
-
-                            mean2 = mean2.squeeze()
-                            var2 = var2.squeeze()
-                            l2 = mean2 - beta * np.sqrt(var2)
-
-                            # If any unsafe lower bound is suddenly above fmin then
-                            # the point is an expander
-                            G_safe[index] = np.any(l2 >= self.fmin[i])
-
-                            # Break if one safety GP is not an expander
-                            if not G_safe[index]:
-                                break
-
                     # Since we sorted by uncertainty and only the most
                     # uncertain element gets picked by SafeOpt anyways, we can
                     # stop after we found the first one
@@ -1685,10 +1603,11 @@ class GoSafe(GaussianProcessOptimization):
 
                 # Update safe set (if full_sets is False this is at most one point
                 self.G[s] = G_safe
+                do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) >= self.eps)
+                if do_S2:
+                    return
 
-                return
-
-            else:
+            elif not do_S2:
                 self.G[:] = False
                 self.M[:] = False
                 self.criterion="S3"
@@ -1735,13 +1654,12 @@ class GoSafe(GaussianProcessOptimization):
             u = self.Q[:, 1::2]
 
             if self.criterion=="S1":
-                M_stack=np.zeros(self.inputs.shape[0], dtype=np.bool)#All false
-                M_stack[self.x_0_idx]=self.M
-                MG = np.logical_or(M_stack, self.G)
+                MG=np.zeros(self.inputs.shape[0], dtype=np.bool)#All false
+                MG[self.x_0_idx] = np.logical_or(self.M, self.G[self.x_0_idx])
                 value = np.max((u[MG] - l[MG]) / self.scaling, axis=1)
                 x = self.inputs[MG, :][np.argmax(value), :]
 
-                del M_stack
+                del MG
 
             elif self.criterion=="S2":
                 #Only look at uncertainty for constraints
@@ -1765,32 +1683,6 @@ class GoSafe(GaussianProcessOptimization):
             return x[:-self.num_contexts]
         else:
             return x
-
-    def optimize(self, context=None, ucb=False):
-        """Run Safe Bayesian optimization and get the next parameters.
-
-        Parameters
-        ----------
-        context: ndarray
-            A vector containing the current context
-        ucb: bool
-            If True the safe-ucb criteria is used instead.
-
-        Returns
-        -------
-        x: np.array
-            The next parameters that should be evaluated.
-        """
-        # Update confidence intervals based on current estimate
-        self.update_confidence_intervals(context=context)
-
-        # Update the sets
-        if ucb:
-            self.compute_safe_set()
-        else:
-            self.compute_sets()
-
-        return self.get_new_query_point(ucb=ucb)
 
     def get_maximum(self, context=None):
         """
@@ -1820,13 +1712,19 @@ class GoSafe(GaussianProcessOptimization):
         self.compute_safe_set()
 
         # Return nothing if there are no safe points
-        if not np.any(self.S):
+        if not np.any(self.S[self.x_0_idx]):
             return None
 
-        l = self.Q[self.S, 0]
+        #Only look at lower bounds for (a,x_0) in the safe set
+        l = self.Q[self.x_0_idx, 0][self.S[self.x_0_idx]]
 
         max_id = np.argmax(l)
-        return (self.inputs[self.S, :][max_id, :-self.num_contexts or None],
+        # Remove all contexts from the parameter space
+        param_without_context = self.inputs[self.x_0_idx, :]
+        param_without_context=param_without_context[self.S[self.x_0_idx], :][max_id, :-self.num_contexts or None]
+
+        #Return only the action and not the state
+        return (param_without_context[:-len(self.state_idx)],
                 l[max_id])
 
 
