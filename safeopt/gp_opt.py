@@ -1786,7 +1786,7 @@ class GoSafe(SafeOpt):
                 l[max_id])
 
 
-    def at_boundary(self,state,tol=0.5,context=None):
+    def at_boundary(self,state,tol=0.5,eta=0.0,context=None):
         """""
             Check if the provided state lies at the boundary and if this is the case return a safe action
 
@@ -1850,7 +1850,7 @@ class GoSafe(SafeOpt):
             mean2, var2 = gp.predict_noiseless(input)
             l2 = mean2 - beta * np.sqrt(var2)
             # Check if the safe state-action pair keep us safe by a tolerance
-            constraint_satisified = l2 >= self.fmin[i] + tol * np.sqrt(var2)
+            constraint_satisified = l2 >= self.fmin[i] + tol * np.sqrt(var2)+eta
             constraint_check+=constraint_satisified*1
             # Break as soon as we are at boundary (we do not have the necessary tolerance for all constraints)
             if np.sum(constraint_satisified) == 0:  # No state action pair fulfils constraint with the given tolerance
@@ -1883,7 +1883,7 @@ class GoSafe(SafeOpt):
 
 
 
-    def check_rollout(self,state,action,tol=0.5,context=None):
+    def check_rollout(self,state,action,tol=0.5,eta=0.0,context=None):
 
         """
                Check if a state from the rollout lies at the boundary and if this is the case return a safe action
@@ -1919,7 +1919,7 @@ class GoSafe(SafeOpt):
 
         if self.criterion == "S3" or self.criterion=="S3_IC":
 
-            at_boundary,a=self.at_boundary(state,tol,context)
+            at_boundary,a=self.at_boundary(state,tol,eta,context)
 
         if not at_boundary:
             a=action
