@@ -1395,83 +1395,91 @@ class GoSafe(SafeOpt):
         # Update safe set
         self.compute_safe_set()
 
-        # Reference to confidence intervals, gets l(a,x,0), u(a,x,0)
-        l, u = self.Q[:, :2].T
-
         if not np.any(self.S):
             self.M[:] = False
             self.G[:] = False
+            self.criterion = "S1"
             return
-
-        #Lower bound and upper bound for initial condition IC
-        u_x0=u[self.x_0_idx]
-        l_x0=l[self.x_0_idx]
-        # Set of possible maximisers
-        # Maximizers: safe upper bound above best, safe lower bound
-        #Find pairs (x_0,a) which lie in S_n
-        safe_x0 = self.S[self.x_0_idx]
-        self.M[:] = False
-        self.M[safe_x0] = u_x0[safe_x0] >= np.max(l_x0[safe_x0])
-        max_var = np.max(u_x0[self.M] - l_x0[self.M]) / self.scaling[0]
-
-        # Optimistic set of possible expanders
-        l = self.Q[:, ::2]
-        u = self.Q[:, 1::2]
-
-
-        self.G[:] = False
 
         # Get the indexes corresponding to constraints as in S2 we are only considering expansions
         num_constraints = len(self.gps)
         # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
         start_constraint = (self.fmin[0] == None) * 1
 
-        # For the run of the algorithm we do not need to calculate the
-        # full set of potential expanders:
-        # We can skip the ones already in M and ones that have lower
-        # variance than the maximum variance in M, max_var or the threshold.
-        # Amongst the remaining ones we only need to find the
-        # potential expander with maximum variance
+        safe_x0 = self.S[self.x_0_idx] #All indexes corresponding to (a,x_0) in S_n
+
+        # l,u for all i in I
+        l = self.Q[:, ::2]
+        u = self.Q[:, 1::2]
+
+        #Check variance of all points in S_n^x_0
+        var_G = np.max((u[self.x_0_idx, :][safe_x0,:] - l[self.x_0_idx, :][safe_x0,:]) / self.scaling, axis=1)
+
+        do_S1=np.any(var_G>=self.eps)
+
+        if do_S1:
+            self.criterion = "S1"
+            # Reference to confidence intervals, gets l(a,x,0), u(a,x,0)
+            l_0, u_0 = self.Q[:, :2].T
+
+            #Lower bound and upper bound for initial condition IC
+            u_x0=u_0[self.x_0_idx]
+            l_x0=l_0[self.x_0_idx]
+            # Set of possible maximisers
+            # Maximizers: safe upper bound above best, safe lower bound
+            #Find pairs (x_0,a) which lie in S_n
+
+            self.M[:] = False
+            self.M[safe_x0] = u_x0[safe_x0] >= np.max(l_x0[safe_x0])
+            max_var = np.max(u_x0[self.M] - l_x0[self.M]) / self.scaling[0]
+
+
+
+
+            self.G[:] = False
+
+
+
+            # For the run of the algorithm we do not need to calculate the
+            # full set of potential expanders:
+            # We can skip the ones already in M and ones that have lower
+            # variance than the maximum variance in M, max_var or the threshold.
+            # Amongst the remaining ones we only need to find the
+            # potential expander with maximum variance
 
         #Start with S1
 
-        if full_sets:
-            s = self.x_0_idx
-            var_G=np.max((u[s, :] - l[s, :]) / self.scaling,axis=1)
+            if full_sets:
+                s = np.zeros(self.inputs.shape[0], dtype=np.bool)
+                s[self.x_0_idx]=safe_x0
+                #var_G=np.max((u[s, :] - l[s, :]) / self.scaling,axis=1)
 
-            do_S1=np.max(np.max(var_G),max_var)>= self.eps
+                #do_S1=np.max(np.max(var_G),max_var)>= self.eps
 
-        else:
-            # skip points in M, they will already be evaluated for x_0
-            s=np.zeros(self.inputs.shape[0], dtype=np.bool)
-            s[self.x_0_idx]= np.logical_and(safe_x0, ~self.M) #Sn,x0 \Mn
-            # Remove points with a variance that is too small
-            s[s] = (np.max((u[s, :] - l[s, :]) / self.scaling, axis=1) >
-                    max_var)
-            s[s] = np.any(u[s, :] - l[s, :] > self.threshold*beta, axis=1) #If any point has a minimal variance of thresshold
+            else:
+                # skip points in M, they will already be evaluated for x_0
+                s=np.zeros(self.inputs.shape[0], dtype=np.bool)
+                s[self.x_0_idx]= np.logical_and(safe_x0, ~self.M) #Sn,x0 \Mn
+                # Remove points with a variance that is too small
+                s[s] = (np.max((u[s, :] - l[s, :]) / self.scaling, axis=1) >
+                        max_var)
+                s[s] = np.any(u[s, :] - l[s, :] > self.threshold*beta, axis=1) #If any point has a minimal variance of thresshold
 
-            #Check if we should apply S1
-            if not np.any(s):
-                #If we have no candidates for G but we are uncertain about some points in M_n, apply S1
-                if max_var >= self.eps:
+                #Check if we should apply S1
+                if not np.any(s):
+                    #If we have no candidates for G but we are uncertain about some points in M_n, apply S1
+                    #if max_var >= self.eps:
                     self.criterion = "S1"
                     return
-                else:
-                    do_S1=False
-            #If we have candidates for G
-            else:
-                #Check if we are uncertain about any of our candidates, if yes apply S1
-                do_S1=np.any((np.max((u[s, :] - l[s, :]) / self.scaling,axis=1) )>= self.eps)
 
 
-        def sort_generator(array):
-            """Return the sorted array, largest element first."""
-            return array.argsort()[::-1]
+            def sort_generator(array):
+                """Return the sorted array, largest element first."""
+                return array.argsort()[::-1]
 
-        #If we apply S1
-        if do_S1:
+            #If we apply S1
             #Update criterion for querying point
-            self.criterion = "S1"
+
 
             # set of safe expanders
             G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
@@ -1485,8 +1493,8 @@ class GoSafe(SafeOpt):
                 sort_index = range(len(G_safe))
 
             # Get all unsafe points with initial state x_0
-            unsafe_points = np.logical_not(self.S)  # All unsafe points
-            unsafe_points = np.logical_and(unsafe_points, self.x_0_idx)  # All unsafe points for x_0
+            #unsafe_points = np.logical_not(self.S)  # All unsafe points
+            unsafe_points = np.logical_and(~self.S, self.x_0_idx)  # All unsafe points for x_0
 
 
             for index in sort_index:
@@ -1550,14 +1558,11 @@ class GoSafe(SafeOpt):
             self.G[s] = G_safe
             del unsafe_points
 
-            #Check if any point in S1 has a variance greater than eps
-            do_S1 = np.any((np.max((u[self.G, :] - l[self.G, :]) / self.scaling, axis=1)) >= self.eps)
 
-            if do_S1:
-                return
+            return
 
         #Go to S2,S3 if S1 has converged
-        elif not do_S1:
+        else:
 
 
             #Check if we have expanded the set enough, if yes, go to S3_IC
@@ -1566,7 +1571,8 @@ class GoSafe(SafeOpt):
 
                 self.G[:] = False
                 self.M[:] = False
-                s = np.logical_not(self.x_0_idx) #Consider all IC which are not x_0
+
+                s = np.logical_and(self.S,~self.x_0_idx) #Consider all IC which are not x_0 but safe
                 #Check if we should do S2: the variance for any potential query point is greater than epsilon
                 var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling, axis=1)
                 do_S2=np.any(var_G>=self.eps)
@@ -1574,6 +1580,11 @@ class GoSafe(SafeOpt):
 
 
                 if do_S2:
+
+                    def sort_generator(array):
+                        """Return the sorted array, largest element first."""
+                        return array.argsort()[::-1]
+
                     self.criterion="S2"
                     G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
 
@@ -1722,7 +1733,7 @@ class GoSafe(SafeOpt):
                 x = self.inputs[sampling_options, :][np.argmax(value), :]
 
             elif self.criterion=="S3_IC": #Criterion S3_IC -> Only samples random actions for x_0
-
+                self.expanding_steps += 1
                 #Look at all unsafe combinations for x_0
                 sampling_options=np.logical_and(self.x_0_idx,~self.S)
                 num_constraints = len(self.gps)
