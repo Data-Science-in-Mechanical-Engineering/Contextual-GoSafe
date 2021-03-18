@@ -1415,7 +1415,7 @@ class GoSafe(SafeOpt):
         #Check variance of all points in S_n^x_0
         var_G = np.max((u[self.x_0_idx, :][safe_x0,:] - l[self.x_0_idx, :][safe_x0,:]) / self.scaling, axis=1)
 
-        do_S1=np.any(var_G>=self.eps)
+        do_S1=np.any(var_G>self.eps)
 
         if do_S1:
             self.criterion = "S1"
@@ -1519,7 +1519,7 @@ class GoSafe(SafeOpt):
                 #             break
                 # else:
                     # Check if expander for all GPs
-                for i, gp in enumerate(self.gps[start_constraint:num_constraints]):
+                for i, gp in enumerate(self.gps):
                     # Skip evlauation if 'no' safety constraint
                     if self.fmin[i] == -np.inf:
                         continue
@@ -1575,7 +1575,7 @@ class GoSafe(SafeOpt):
                 s = np.logical_and(self.S,~self.x_0_idx) #Consider all IC which are not x_0 but safe
                 #Check if we should do S2: the variance for any potential query point is greater than epsilon
                 var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling, axis=1)
-                do_S2=np.any(var_G>=self.eps)
+                do_S2=np.any(var_G>self.eps)
 
 
 
@@ -1616,7 +1616,7 @@ class GoSafe(SafeOpt):
                         #             break
                         # else:
                             # Check if expander for all GPs (only consider the constraints)
-                        for i, gp in enumerate(self.gps[start_constraint:num_constraints]):
+                        for i, gp in enumerate(self.gps):
                             # Skip evlauation if 'no' safety constraint
                             if self.fmin[i] == -np.inf:
                                 continue
@@ -1655,7 +1655,7 @@ class GoSafe(SafeOpt):
                     if np.any(G_safe):
                         self.G[s] = G_safe
                         #Check for the set G if we are uncertain about any point, if yes do S2.
-                        do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) >= self.eps)
+                        do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) > self.eps)
                         if do_S2:
                             return
                     else:
@@ -1859,7 +1859,10 @@ class GoSafe(SafeOpt):
 
         constraint_check = np.zeros([input.shape[0],1])
         # Loop over all constraints
-        for i, gp in enumerate(self.gps[start_constraint:num_constraints]):
+        for i, gp in enumerate(self.gps):
+
+            if self.fmin[i] == -np.inf:
+                continue
             # Get lowerbound for parameter choice
             mean2, var2 = gp.predict_noiseless(input)
             l2 = mean2 - beta * np.sqrt(var2)
