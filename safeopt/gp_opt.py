@@ -1404,7 +1404,7 @@ class GoSafe(SafeOpt):
         # Get the indexes corresponding to constraints as in S2 we are only considering expansions
         num_constraints = len(self.gps)
         # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
-        start_constraint = (self.fmin[0] == None) * 1
+        start_constraint = (self.fmin[0] == -np.inf) * 1
 
         safe_x0 = self.S[self.x_0_idx] #All indexes corresponding to (a,x_0) in S_n
 
@@ -1652,14 +1652,17 @@ class GoSafe(SafeOpt):
                             break
 
                     # Update safe set (if full_sets is False this is at most one point)
-                    self.G[s] = G_safe
-                    #Check for the set G if we are uncertain about any point, if yes do S2.
-                    do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) >= self.eps)
-                    if do_S2:
-                        return
+                    if np.any(G_safe):
+                        self.G[s] = G_safe
+                        #Check for the set G if we are uncertain about any point, if yes do S2.
+                        do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) >= self.eps)
+                        if do_S2:
+                            return
+                    else:
+                        do_S2=False
 
                 #S3
-                elif not do_S2:
+                if not do_S2:
                     self.G[:] = False
                     self.M[:] = False
                     self.criterion="S3"
@@ -1714,7 +1717,7 @@ class GoSafe(SafeOpt):
                 #Only look at uncertainty for constraints
                 num_constraints=len(self.gps)
                 #Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
-                start_constraint=(self.fmin[0]==None)*1
+                start_constraint=(self.fmin[0]==-np.inf)*1
                 #Find max_(a,x_0') max_i w_n(a,x_0') for i in I_g
                 value = np.max((u[self.G,start_constraint:num_constraints] - l[self.G,start_constraint:num_constraints]) / self.scaling, axis=1)
                 x = self.inputs[self.G, :][np.argmax(value), :]
@@ -1727,7 +1730,7 @@ class GoSafe(SafeOpt):
                 # Only look at uncertainty for constraints
                 num_constraints = len(self.gps)
                 # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
-                start_constraint = (self.fmin[0] == None) * 1
+                start_constraint = (self.fmin[0] == -np.inf) * 1
                 # Find max_(a,x_0') max_i w_n(a,x_0') for i in I_g  and (a,x_0') not in S_n but x_0' in safe states
                 value = np.max((u[sampling_options, start_constraint:num_constraints] - l[sampling_options, start_constraint:num_constraints]) / self.scaling, axis=1)
                 x = self.inputs[sampling_options, :][np.argmax(value), :]
@@ -1738,7 +1741,7 @@ class GoSafe(SafeOpt):
                 sampling_options=np.logical_and(self.x_0_idx,~self.S)
                 num_constraints = len(self.gps)
                 # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
-                start_constraint = (self.fmin[0] == None) * 1
+                start_constraint = (self.fmin[0] == -np.inf) * 1
                 # Find max_(a,x_0) max_i w_n(a,x_0) for i in I_g  and (a,x_0)
                 value = np.max((u[sampling_options, start_constraint:num_constraints] - l[sampling_options,
                                                                                         start_constraint:num_constraints]) / self.scaling,axis=1)
@@ -1834,7 +1837,7 @@ class GoSafe(SafeOpt):
         beta = self.beta(self.t)
         num_constraints = len(self.gps)
         # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
-        start_constraint = (self.fmin[0] == None) * 1
+        start_constraint = (self.fmin[0] == -np.inf) * 1
 
         ##find the closest state in the discretized parameterset to obtain a potentially safe action
 
