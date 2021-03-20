@@ -1271,7 +1271,7 @@ class GoSafe(SafeOpt):
     """
 
     def __init__(self, gp, parameter_set, fmin,x_0, beta=2,
-                 num_contexts=0, threshold=0, scaling='auto',extensions=False,constraint_bounds=False,eps=0.1,max_ic_expansions=100000):
+                 num_contexts=0, threshold=0, scaling='auto',extensions=False,constraint_bounds=False,eps=0.1,tol=0.5,eta=0.2,max_ic_expansions=100000):
         """Initialization, see `SafeOpt`."""
         super(GoSafe, self).__init__(gp,
                                       parameter_set=parameter_set,
@@ -1284,36 +1284,41 @@ class GoSafe(SafeOpt):
 
         # Dimension of state
         self.state_dim=np.shape(x_0)[0]
-        #Indexes where states are stored in the input vector
+        # Indexes where states are stored in the input vector
         self.state_idx=list(range(parameter_set.shape[1]-self.state_dim,parameter_set.shape[1]))
 
 
-        #In general, x_0 may not lie in the discretized state space, look for the closest state (in L2 sense) in that case
-        unique_states=np.unique(parameter_set[:,self.state_idx],axis=0)
-        closest_state_idx=np.argmin(np.linalg.norm(unique_states-x_0,axis=1))
-        closest_state=unique_states[closest_state_idx]
+        # In general, x_0 may not lie in the discretized state space, look for the closest state (in L2 sense) in that case
+        self.unique_states=np.unique(parameter_set[:,self.state_idx],axis=0)
+        closest_state_idx=np.argmin(np.linalg.norm(self.unique_states-x_0,axis=1))
+        closest_state=self.unique_states[closest_state_idx]
         # All combinations with initial condition x_0
         self.x_0_idx =np.sum(parameter_set[:,self.state_idx]==closest_state,axis=1)==self.state_dim
 
-        self.boundary_states=np.zeros([unique_states.shape[0],self.state_dim+1])
-        self.boundary_states[:,:-1]=unique_states
-        self.boundary_states[self.state_dim]=np.array(self.boundary_states[self.state_dim], dtype=bool)
-        #Only need M for IC x_0
+
+        #_boundary_data_points is a vector used to store whether each point in the GP hit the boundary or not and if it did for which state (which index)
+        self._bounadry_data_points=np.ones([self._x.shape[0],1],dtype=int)*-1
+        # Index of state which hit the boundary, if -1 then experiment was safe
+        self._boundary_state_idx=-1
+        # Only need M for IC x_0
         self.M = self.S[self.x_0_idx].copy()
 
-        #Safe_states, a boolean vector that indicates which parameter combinations correspond to safe states
-        self.safe_states_combination=self.S.copy()
+        # Safe_states, a boolean vector that indicates which parameter combinations correspond to safe states
+        self.S3_combinations=self.S.copy()
 
-        #Used to make modifications on GoSafe, currently unimplemented
+        # Used to make modifications on GoSafe, currently unimplemented
         self.extensions=extensions
         self.x_0 = x_0
         self.constraint_bounds=constraint_bounds
         #Using as an indicator to note that Q has been initialized arbitrarily, will be required for constraining
         self.Q_empty=True
-        self.criterion="S1" #Which step we are running at the moment -> [S1,S2,S3,S3_IC], where S3_IC is when we run the step S3 and fix the state to be IC
-        self.eps=eps #Defined to switch between S1,S2,S3
-        self.expanding_steps=0 #Number of steps we did S2 and S3
-        self.max_ic_expansions=max_ic_expansions #Maximum number of expansions we do for an arbitrary IC condition.
+        self.criterion="S1" # Which step we are running at the moment -> [S1,S2,S3,S3_IC], where S3_IC is when we run the step S3 and fix the state to be IC
+        self.eps=eps # Defined to switch between S1,S2,S3
+        self.expanding_steps=0 # Number of steps we did S2 and S3
+        self.max_ic_expansions=max_ic_expansions # Maximum number of expansions we do for an arbitrary IC condition.
+        # Tolerance used for boundary constraints
+        self.tol=tol
+        self.eta=eta
 
     def update_confidence_intervals(self, context=None):
         """Recompute the confidence intervals form the GP.
@@ -1357,25 +1362,30 @@ class GoSafe(SafeOpt):
 
                 self.Q_empty=False
 
-    def compute_safe_states(self):
+    def compute_unsafe_expansion_set(self):
 
         """
-            Compute the set of states for which there exists a safe action, based on current confidence bounds.
-            And signal all parameter combinations associated with these safe states
+            Compute unsafe state action pairs for safe states
         """
         # Find all states for which we have a safe action
 
         # Get all states that are unique in the Safe set
         safe_options = self.inputs[self.S, :]
         safe_states = np.unique(safe_options[:, self.state_idx], axis=0)
+        # Get all unsafe parameter combinations
+        unsafe_combinations=np.logical_not(self.S)
+        unsafe_inputs=self.inputs[unsafe_combinations, :]
 
-        # Loop over all unique states to check which parameter combinations are associated with safe states
+        combinations_idx=np.zeros(unsafe_combinations.shape[0],dtype=bool)
+
+        # Loop over all unique states to check unsafe parameter combinations associated with the safe states
         for i in range(safe_states.shape[0]):
-            # Get all indexes in the parameter set which correspond to safe_states[i]
-            idx = np.where(np.sum(self.inputs[:, self.state_idx] == safe_states[i], axis=1) == self.state_dim)
-            #all idx, correspond to parameter combinations with state safe_state[i] which is a safe_state
-            self.safe_states_combination[idx] = True
-
+            # Get all indexes in the unsafe parameter set which correspond to safe_states[i]
+            idx = np.where(np.sum(unsafe_inputs[:, self.state_idx] == safe_states[i], axis=1) == self.state_dim)[0]
+            # For all unsafe combination for safe state i, set idx to true
+            combinations_idx[idx]= True
+        #The updated combinations are used for S3
+        self.S3_combinations[unsafe_combinations]=combinations_idx
 
     def compute_sets(self, full_sets=False):
         """
@@ -1401,85 +1411,78 @@ class GoSafe(SafeOpt):
             self.criterion = "S1"
             return
 
-        # Get the indexes corresponding to constraints as in S2 we are only considering expansions
+        # Get the indexes corresponding to constraints
         num_constraints = len(self.gps)
         # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
         start_constraint = (self.fmin[0] == -np.inf) * 1
 
-        safe_x0 = self.S[self.x_0_idx] #All indexes corresponding to (a,x_0) in S_n
+        safe_x0 = self.S[self.x_0_idx] # All indexes corresponding to (a,x_0) in S_n
 
         # l,u for all i in I
         l = self.Q[:, ::2]
         u = self.Q[:, 1::2]
 
-        #Check variance of all points in S_n^x_0
-        var_G = np.max((u[self.x_0_idx, :][safe_x0,:] - l[self.x_0_idx, :][safe_x0,:]) / self.scaling, axis=1)
 
-        do_S1=np.any(var_G>self.eps)
+        # Get l(a,x,0), u(a,x,0) for our initial condition IC
+        l_x0, u_x0 = self.Q[self.x_0_idx, :2].T
 
-        if do_S1:
-            self.criterion = "S1"
-            # Reference to confidence intervals, gets l(a,x,0), u(a,x,0)
-            l_0, u_0 = self.Q[:, :2].T
-
-            #Lower bound and upper bound for initial condition IC
-            u_x0=u_0[self.x_0_idx]
-            l_x0=l_0[self.x_0_idx]
-            # Set of possible maximisers
-            # Maximizers: safe upper bound above best, safe lower bound
-            #Find pairs (x_0,a) which lie in S_n
-
-            self.M[:] = False
-            self.M[safe_x0] = u_x0[safe_x0] >= np.max(l_x0[safe_x0])
-            max_var = np.max(u_x0[self.M] - l_x0[self.M]) / self.scaling[0]
+        # Set of possible maximisers
+        # Maximizers: safe upper bound above best, safe lower bound
+        self.M[:] = False
+        self.M[safe_x0] = u_x0[safe_x0] >= np.max(l_x0[safe_x0])
+        max_var = np.max(u_x0[self.M] - l_x0[self.M]) / self.scaling[0]
 
 
 
 
-            self.G[:] = False
+        self.G[:] = False
 
+        #Reset all combinations for S3 (need to be revaluated)
+        self.S3_combinations[:] = False
 
-
-            # For the run of the algorithm we do not need to calculate the
-            # full set of potential expanders:
-            # We can skip the ones already in M and ones that have lower
-            # variance than the maximum variance in M, max_var or the threshold.
-            # Amongst the remaining ones we only need to find the
-            # potential expander with maximum variance
+        # For the run of the algorithm we do not need to calculate the
+        # full set of potential expanders:
+        # We can skip the ones already in M and ones that have lower
+        # variance than the maximum variance in M, max_var or the threshold.
+        # Amongst the remaining ones we only need to find the
+        # potential expander with maximum variance
 
         #Start with S1
 
-            if full_sets:
-                s = np.zeros(self.inputs.shape[0], dtype=np.bool)
-                s[self.x_0_idx]=safe_x0
-                #var_G=np.max((u[s, :] - l[s, :]) / self.scaling,axis=1)
+        if full_sets:
+            s = np.zeros(self.inputs.shape[0], dtype=np.bool)
+            s[self.x_0_idx]=safe_x0
+            var_G=np.max((u[s, :] - l[s, :]) / self.scaling,axis=1)
 
-                #do_S1=np.max(np.max(var_G),max_var)>= self.eps
+            do_S1=np.any(var_G > self.eps)
 
-            else:
-                # skip points in M, they will already be evaluated for x_0
-                s=np.zeros(self.inputs.shape[0], dtype=np.bool)
-                s[self.x_0_idx]= np.logical_and(safe_x0, ~self.M) #Sn,x0 \Mn
-                # Remove points with a variance that is too small
-                s[s] = (np.max((u[s, :] - l[s, :]) / self.scaling, axis=1) >
-                        max_var)
-                s[s] = np.any(u[s, :] - l[s, :] > self.threshold*beta, axis=1) #If any point has a minimal variance of thresshold
+        else:
+            # skip points in M, they will already be evaluated for x_0
+            s=np.zeros(self.inputs.shape[0], dtype=np.bool)
+            s[self.x_0_idx]= np.logical_and(safe_x0, ~self.M) #Sn,x0 \Mn
+            # Remove points with a variance that is too small
+            s[s] = (np.max((u[s, :] - l[s, :]) / self.scaling, axis=1) >
+                    max_var)
+            s[s] = np.any(u[s, :] - l[s, :] > self.threshold*beta, axis=1) #If any point has a minimal variance of thresshold
 
-                #Check if we should apply S1
-                if not np.any(s):
-                    #If we have no candidates for G but we are uncertain about some points in M_n, apply S1
-                    #if max_var >= self.eps:
+            # Check if we should apply S1
+            if not np.any(s):
+                # If we have no candidates for G but we are uncertain about some points in M_n, apply S1
+                if max_var > self.eps:
                     self.criterion = "S1"
                     return
+                else:
+                    do_S1=False
+            else:
+                do_S1=np.any(np.max((u[s, :] - l[s, :]) / self.scaling, axis=1) >
+                 self.eps)
 
-
+        if do_S1:
+            # Update criterion for querying point
+            self.criterion="S1"
             def sort_generator(array):
                 """Return the sorted array, largest element first."""
                 return array.argsort()[::-1]
-
-            #If we apply S1
-            #Update criterion for querying point
-
 
             # set of safe expanders
             G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
@@ -1493,7 +1496,6 @@ class GoSafe(SafeOpt):
                 sort_index = range(len(G_safe))
 
             # Get all unsafe points with initial state x_0
-            #unsafe_points = np.logical_not(self.S)  # All unsafe points
             unsafe_points = np.logical_and(~self.S, self.x_0_idx)  # All unsafe points for x_0
 
 
@@ -1524,13 +1526,13 @@ class GoSafe(SafeOpt):
                     if self.fmin[i] == -np.inf:
                         continue
 
-                    # Add safe point with its max possible value to the gp
+                    # Add safe point with its optimistic value to the gp
                     self._add_data_point(gp=gp,
                                          x=self.parameter_set[s, :][index, :],
                                          y=u[s, i][index],
                                          context=self.context)
 
-                    #Get l2 of all unsafe points with state x_0
+                    # Get l2 of all unsafe points with state x_0
                     mean2, var2 = gp.predict_noiseless(self.inputs[unsafe_points])
 
                     # Remove the fake data point from the GP again
@@ -1549,35 +1551,46 @@ class GoSafe(SafeOpt):
                         break
 
                 # Since we sorted by uncertainty and only the most
-                # uncertain element gets picked by SafeOpt anyways, we can
+                # uncertain element gets picked by GoSafe anyways, we can
                 # stop after we found the first one
                 if G_safe[index] and not full_sets:
                     break
 
-            # Update safe set (if full_sets is False this is at most one point)
-            self.G[s] = G_safe
             del unsafe_points
 
+            self.G[s] = G_safe
 
-            return
+            # Check if variance in G_n U M_n is greater than epsilon
+            if max_var>self.eps:
+                return
+            # If variance in M_n is less than eps, G_n is our only hope
+            else:
+                # Check if we could find any expander
+                if np.any(G_safe):
 
-        #Go to S2,S3 if S1 has converged
-        else:
+                    # If variance in G_n greater than eps --> do_S1
+                    do_S1= np.any((np.max((u[self.G,:] - l[self.G, :]) / self.scaling, axis=1)) > self.eps)
+                    if do_S1:
+                        return
+                #If the set of expanders is empty and uncertainty in M_n is less than eps. We go to S2,S3
+                else:
+                    do_S1=False
+
+        # Go to S2,S3 if S1 has converged
+        if not do_S1:
 
 
-            #Check if we have expanded the set enough, if yes, go to S3_IC
+            # Check if we have expanded the set enough, if yes, go to S3_IC
             if self.expanding_steps < self.max_ic_expansions:
 
 
                 self.G[:] = False
                 self.M[:] = False
 
-                s = np.logical_and(self.S,~self.x_0_idx) #Consider all IC which are not x_0 but safe
-                #Check if we should do S2: the variance for any potential query point is greater than epsilon
-                var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling, axis=1)
+                s = np.logical_and(self.S,~self.x_0_idx) # Consider all IC which are not x_0 but safe
+                # Check if we should do S2: the variance for any potential query point is greater than epsilon
+                var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling[start_constraint:num_constraints], axis=1)
                 do_S2=np.any(var_G>self.eps)
-
-
 
                 if do_S2:
 
@@ -1589,8 +1602,10 @@ class GoSafe(SafeOpt):
                     G_safe = np.zeros(np.count_nonzero(s), dtype=np.bool)
 
                     if not full_sets:
-                        sort_index = sort_generator(np.max((u[s, :] - l[s, :])/self.scaling,
-                                                           axis=1))
+                        #Sort based on uncertainty w_n
+                        sort_index = sort_generator(np.max((u[s, start_constraint:num_constraints] - l[s,
+                                                                                                     start_constraint:num_constraints])/self.scaling[start_constraint:num_constraints],
+                                                                                                        axis=1))
                     else:
                         sort_index = range(len(G_safe))
 
@@ -1651,26 +1666,31 @@ class GoSafe(SafeOpt):
                         if G_safe[index] and not full_sets:
                             break
 
-                    # Update safe set (if full_sets is False this is at most one point)
+
                     if np.any(G_safe):
+                        # Update safe set (if full_sets is False this is at most one point)
                         self.G[s] = G_safe
-                        #Check for the set G if we are uncertain about any point, if yes do S2.
-                        do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G, start_constraint:num_constraints]) / self.scaling, axis=1)) > self.eps)
+                        # Check for the set G if we are uncertain about any point, if yes do S2.
+                        do_S2 = np.any((np.max((u[self.G, start_constraint:num_constraints] - l[self.G,
+                                                                                              start_constraint:num_constraints]) / self.scaling[start_constraint:num_constraints],
+                                                                                                axis=1)) > self.eps)
                         if do_S2:
                             return
                     else:
                         do_S2=False
 
-                #S3
+                # S3
                 if not do_S2:
                     self.G[:] = False
                     self.M[:] = False
                     self.criterion="S3"
 
-                    self.compute_safe_states()
+                    self.compute_unsafe_expansion_set()
 
             else:
-                #This criteria corresponds to the case where we do not expand our safe set for any arbitrary IC but only for x_0
+                self.G[:] = False
+                self.M[:] = False
+                # This criteria corresponds to the case where we do not expand our safe set for any arbitrary IC but only for x_0
                 self.criterion="S3_IC"
 
 
@@ -1702,8 +1722,8 @@ class GoSafe(SafeOpt):
             u = self.Q[:, 1::2]
 
             if self.criterion=="S1":
-                MG=np.zeros(self.inputs.shape[0], dtype=np.bool)#All false
-                #As S1 only considers IC _x0, we only sample combinations corresponding to our IC
+                MG=np.zeros(self.inputs.shape[0], dtype=np.bool)# All false
+                # As S1 only considers IC _x0, we only sample combinations corresponding to our IC
                 MG[self.x_0_idx] = np.logical_or(self.M, self.G[self.x_0_idx]) #M_n U G_n
 
                 # Find max_a max_i w_n(a,x_0)
@@ -1714,28 +1734,31 @@ class GoSafe(SafeOpt):
 
             elif self.criterion=="S2":
                 self.expanding_steps += 1  # Increase expanding step counter
-                #Only look at uncertainty for constraints
+                # Only look at uncertainty for constraints
                 num_constraints=len(self.gps)
-                #Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
+                # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
                 start_constraint=(self.fmin[0]==-np.inf)*1
-                #Find max_(a,x_0') max_i w_n(a,x_0') for i in I_g
-                value = np.max((u[self.G,start_constraint:num_constraints] - l[self.G,start_constraint:num_constraints]) / self.scaling, axis=1)
+                # Find max_(a,x_0') max_i w_n(a,x_0') for i in I_g
+                value = np.max((u[self.G,start_constraint:num_constraints] - l[self.G,
+                                                                             start_constraint:num_constraints]) / self.scaling[start_constraint:num_constraints],
+                                                                                axis=1)
                 x = self.inputs[self.G, :][np.argmax(value), :]
 
 
             elif self.criterion=="S3":
                 self.expanding_steps += 1  # Increase expanding step counter
-                #Look at the set of state action pairs which do not lie in S but there exists an action such that the state is safe->safe_states
-                sampling_options=np.logical_and(self.safe_states_combination,~self.S)
+
                 # Only look at uncertainty for constraints
                 num_constraints = len(self.gps)
                 # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
                 start_constraint = (self.fmin[0] == -np.inf) * 1
                 # Find max_(a,x_0') max_i w_n(a,x_0') for i in I_g  and (a,x_0') not in S_n but x_0' in safe states
-                value = np.max((u[sampling_options, start_constraint:num_constraints] - l[sampling_options, start_constraint:num_constraints]) / self.scaling, axis=1)
-                x = self.inputs[sampling_options, :][np.argmax(value), :]
+                value = np.max((u[self.S3_combinations, start_constraint:num_constraints] - l[self.S3_combinations,
+                                                                                        start_constraint:num_constraints]) / self.scaling[start_constraint:num_constraints],
+                                                                                            axis=1)
+                x = self.inputs[self.S3_combinations, :][np.argmax(value), :]
 
-            elif self.criterion=="S3_IC": #Criterion S3_IC -> Only samples random actions for x_0
+            elif self.criterion=="S3_IC": # Criterion S3_IC -> Only samples random actions for x_0
                 self.expanding_steps += 1
                 #Look at all unsafe combinations for x_0
                 sampling_options=np.logical_and(self.x_0_idx,~self.S)
@@ -1744,7 +1767,8 @@ class GoSafe(SafeOpt):
                 start_constraint = (self.fmin[0] == -np.inf) * 1
                 # Find max_(a,x_0) max_i w_n(a,x_0) for i in I_g  and (a,x_0)
                 value = np.max((u[sampling_options, start_constraint:num_constraints] - l[sampling_options,
-                                                                                        start_constraint:num_constraints]) / self.scaling,axis=1)
+                                                                                        start_constraint:num_constraints]) / self.scaling[start_constraint:num_constraints],
+                                                                                            axis=1)
                 x = self.inputs[sampling_options, :][np.argmax(value), :]
 
             else: #Introduced for debuging purposes, as criterion has to be in [S1,S2,S3,S3_IC]
@@ -1788,8 +1812,9 @@ class GoSafe(SafeOpt):
             return None
 
         #Only look at lower bounds for (a,x_0) in the safe set
+        #idx=np.logical_and(self.S,self.x_0_idx)
         l = self.Q[self.x_0_idx, 0][self.S[self.x_0_idx]]
-
+        #l=self.Q[idx,0]
         max_id = np.argmax(l)
         # Remove all contexts from the parameter space
         param_without_context = self.inputs[self.x_0_idx, :]
@@ -1800,7 +1825,7 @@ class GoSafe(SafeOpt):
                 l[max_id])
 
 
-    def at_boundary(self,state,tol=0.5,eta=0.0,context=None):
+    def at_boundary(self,state,context=None):
         """""
             Check if the provided state lies at the boundary and if this is the case return a safe action
 
@@ -1808,9 +1833,6 @@ class GoSafe(SafeOpt):
                ----------
                state: ndarray
                    A vector containing the current state
-
-               tol: double
-                   tolerance to check whether the state lies at the boundary or not
 
                context: ndarray
                    A vector containing the current context
@@ -1828,9 +1850,8 @@ class GoSafe(SafeOpt):
                Hence, the safe actions associated to the closest state in the parameter set (measured using L2 norm)
                are considered to be safe actions for the real state.
 
-               Furthermore, for all states which lie at the boundary self.boundary_states is updated to indicate.
-               This is required to revisit and check whether all boundary states still lie at the boundary after
-               expansions of the safe set.
+               Furthermore, for all states and data points that lie at the boundary self._boundary_state_idx stores
+               the index of the state. This is then used to indicate whether a experiment failed or not
         """
         a=None
         at_boundary = True
@@ -1839,15 +1860,13 @@ class GoSafe(SafeOpt):
         # Check if performance function is constrained, if not look at uncertainty from 1:num_constraints
         start_constraint = (self.fmin[0] == -np.inf) * 1
 
-        ##find the closest state in the discretized parameterset to obtain a potentially safe action
-
-        # Get all unique safe_states
+        # Get all safe_states
         safe_params = self.inputs[self.S, :]  # all safe parameter combinations
-        safe_states = np.unique(safe_params[:, self.state_idx], axis=0)  # All safe states
         # Find the closest state according to the second norm
-        closest_idx = np.argmin(np.linalg.norm(safe_states - state, axis=1))
-        closest_state = safe_states[closest_idx]
-        state_idx = np.sum(safe_params[:, self.state_idx] == closest_state, axis=1) == self.state_dim
+        dist=np.linalg.norm(safe_params[:, self.state_idx] - state, axis=1)
+        state_idx = np.where(dist==dist.min())[0]
+        closest_state = np.unique(safe_params[state_idx, self.state_idx],axis=0)
+        #state_idx = np.sum(safe_params[:, self.state_idx] == closest_state, axis=1) == self.state_dim
 
         # Define all backup policies we could take for our state
         input = safe_params[state_idx, :]
@@ -1867,7 +1886,7 @@ class GoSafe(SafeOpt):
             mean2, var2 = gp.predict_noiseless(input)
             l2 = mean2 - beta * np.sqrt(var2)
             # Check if the safe state-action pair keep us safe by a tolerance
-            constraint_satisified = l2 >= self.fmin[i] + tol * np.sqrt(var2)+eta
+            constraint_satisified = l2 >= self.fmin[i] + self.tol * np.sqrt(var2)+self.eta
             constraint_check+=constraint_satisified*1
             # Break as soon as we are at boundary (we do not have the necessary tolerance for all constraints)
             if np.sum(constraint_satisified) == 0:  # No state action pair fulfils constraint with the given tolerance
@@ -1878,7 +1897,7 @@ class GoSafe(SafeOpt):
             at_boundary = False
 
         # Return a safe action (here the action which maximizes the lowerbound of the reward is returned)
-        # and update boundary states
+        # and update boundary index
         if at_boundary:
             mean2, var2 = self.gps[0].predict_noiseless(input)
             l2 = mean2 - beta * np.sqrt(var2)
@@ -1888,19 +1907,17 @@ class GoSafe(SafeOpt):
             param_without_context = input[max_id, :-self.num_contexts or None]
             a = param_without_context[:-self.state_dim]
 
-            state_vec = self.boundary_states[:,:-1]
-            #closest_idx = np.argmin(np.linalg.norm(state_vec - state, axis=1))
-            #closest_state = state_vec[closest_idx]
-            state_idx = np.sum(state_vec == closest_state, axis=1) == self.state_dim
-            self.boundary_states[state_idx, self.state_dim] = at_boundary
-
+            # Find index of the state which led to failure
+            state_idx =np.where(np.sum(self.unique_states == closest_state, axis=1) == self.state_dim)
+            # Save the index, will be used when data is stored/added to GP
+            self._boundary_state_idx=state_idx[0][0]
         return at_boundary,a
 
 
 
 
 
-    def check_rollout(self,state,action,tol=0.5,eta=0.0,context=None):
+    def check_rollout(self,state,action,context=None):
 
         """
                Check if a state from the rollout lies at the boundary and if this is the case return a safe action
@@ -1929,19 +1946,121 @@ class GoSafe(SafeOpt):
                Notes
                -----
                As all rollouts from S1,S2 are safe with high probability, we only check for the boundary
-               for criterion S3.
+               for criterion S3, S3_IC.
                """
 
         at_boundary = False
 
         if self.criterion == "S3" or self.criterion=="S3_IC":
 
-            at_boundary,a=self.at_boundary(state,tol,eta,context)
+            at_boundary,a=self.at_boundary(state,context)
 
         if not at_boundary:
             a=action
 
         return at_boundary,a
+
+
+    def Update_gp_data(self):
+
+        """""
+        Checks if failed experiments would still fail after updating GPs and safe sets
+        If yes, these experiments are removed from the GP
+        
+        """""
+
+        num_constraints = len(self.gps)
+        # Check which points led to failure (index!=-1)
+        failed_data_idx=np.where(self._bounadry_data_points!=-1)
+        # Check at which state the failure took place
+        boundary_states_idx=np.unique(self._bounadry_data_points[failed_data_idx])
+        states=self.unique_states[boundary_states_idx]
+        # Loop over each of the states from which we switched to a safe policy
+        safe_params = self.inputs[self.S, :]
+        for j in range(states.shape[0]):
+            # Find the state in the safe set
+            state_idx = np.sum(safe_params[:, self.state_idx] == states[j], axis=1) == self.state_dim
+
+            # Collect the lower and upper bound to check if it would still lie at the boundary.
+            l2=self.Q[self.S, ::2][state_idx,:]
+            u2=self.Q[self.S,1::2][state_idx,:]
+            constraint_check=l2 >= self.fmin + self.tol * np.sqrt(u2-l2) + self.eta
+
+            # If the state is no more at the boundary, remove it from the GP
+            if np.any(np.sum(constraint_check,axis=1)== num_constraints):
+                # Find all data points in GP for which the state led to failure
+                idx=np.where(self._bounadry_data_points==boundary_states_idx[j])[0]
+                # Delete data points from the GP
+                X = self.gps[0].X
+                X = np.delete(X, idx, 0)
+                self._x = np.delete(self._x, idx, 0)
+                self._bounadry_data_points = np.delete(self._bounadry_data_points, idx, 0)
+                # Loop over all y datapoints to delete them
+                for gp in self.gps:
+                    Y=gp.Y
+                    Y=np.delete(Y,idx,0)
+
+                    gp.set_XY(X, Y)
+                self._y = np.delete(self._y, idx, 0)
+
+
+
+
+
+
+
+    def add_new_data_point(self, x, y,context=None):
+        """
+        Add a new function observation to the GPs.
+
+        This function is the same as for safeopt
+        but it also monitors a _boundary_data_point
+        vector which stores indexes of states at which
+        an experiment failed. If experiment was successful
+        stored index is -1
+
+        Parameters
+        ----------
+        x: 2d-array
+        y: 2d-array
+        context: array_like
+            The context(s) used for the data points.
+        """
+        x = np.atleast_2d(x)
+        y = np.atleast_2d(y)
+
+        if self.num_contexts:
+            x = self._add_context(x, context)
+
+        for i, gp in enumerate(self.gps):
+            not_nan = ~np.isnan(y[:, i])
+            if np.any(not_nan):
+                # Add data to GP (context already included in x)
+                self._add_data_point(gp, x[not_nan, :], y[not_nan, [i]])
+
+        # Update global data stores
+        self._x = np.concatenate((self._x, x), axis=0)
+        self._y = np.concatenate((self._y, y), axis=0)
+        # Store index of state at which experiment failed (-1 if experiment was successful)
+        self._bounadry_data_points=np.concatenate((self._bounadry_data_points,np.array([[self._boundary_state_idx]])),axis=0)
+        # Reset index counter
+        self._boundary_state_idx=-1
+
+    def remove_last_data_point(self):
+        """Remove the data point that was last added to the GP. Updated to also remove the respective boundary point"""
+        last_y = self._y[-1]
+
+        for gp, yi in zip(self.gps, last_y):
+            if not np.isnan(yi):
+                gp.set_XY(gp.X[:-1, :], gp.Y[:-1, :])
+
+        self._x = self._x[:-1, :]
+        self._y = self._y[:-1, :]
+        self._bounadry_data_points=self._bounadry_data_points[:-1,:]
+
+
+
+
 
 
 
