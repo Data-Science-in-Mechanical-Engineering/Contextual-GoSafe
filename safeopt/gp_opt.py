@@ -1241,6 +1241,18 @@ class GoSafe(SafeOpt):
     Constraint_bounds: Boolean
         Constraints lower_bound l_n = max(l_{n-1},mu-beta*sigma), u_n = max(u_{n-1},mu+beta*sigma)
 
+    eps: double
+        Used as stopping criteria for running S1 and S2 (as in paper)
+
+    tol: double
+        tolerance, multiplied with the variance to check for boundary conditions
+
+    eta: double
+        tolerance, added to tol*sigma to check for boundary condition
+
+    max_ic_expansions: int
+        maximum number of S2 and S3 steps performed. Once reached, we only sample unsafe actions for x_0 -> S3_IC criteria
+
     Examples
     --------
     >>> from safeopt import GoSafe
@@ -1928,40 +1940,50 @@ class GoSafe(SafeOpt):
         # Define all backup policies we could take for our state
         input = safe_params[safe_idx, :]
         #input[:, self.state_idx] = state
-
+        l2 = self.Q[:, ::2]
+        l2=l2[self.S,:]
+        l2 = l2[safe_idx, :]
+        u2 = self.Q[:, 1::2]
+        u2=u2[self.S,:]
+        u2=u2[safe_idx,:]
         # Add contexts if provided
         if context is not None:
             input = self._add_context(input, context)
 
-        constraint_check = np.zeros([input.shape[0],1])
+        #constraint_check = np.zeros([input.shape[0],1])
         # Loop over all constraints
-        for i, gp in enumerate(self.gps):
+        var2=u2-l2
+        constraint_check = l2 >= self.fmin + self.tol * np.sqrt(var2) + self.eta * self.scaling
 
-            if self.fmin[i] == -np.inf:
-                continue
-            # Get lowerbound for parameter choice
-            mean2, var2 = gp.predict_noiseless(input)
-            l2 = mean2 - beta * np.sqrt(var2)
-            # Check if the safe state-action pair keep us safe by a tolerance
-            constraint_satisified = l2 >= self.fmin[i] + self.tol * np.sqrt(var2)+self.eta
-            constraint_check+=constraint_satisified*1
-            # Break as soon as we are at boundary (we do not have the necessary tolerance for all constraints)
-            if np.sum(constraint_satisified) == 0:  # No state action pair fulfils constraint with the given tolerance
-                break
+        # for i, gp in enumerate(self.gps):
+        #
+        #     if self.fmin[i] == -np.inf:
+        #         continue
+        #     # Get lowerbound for parameter choice
+        #     #mean2, var2 = gp.predict_noiseless(input)
+        #     #l2 = mean2 - beta * np.sqrt(var2)
+        #     l2=l[:,i]
+        #     var2=u[:,i]-l[:,i]
+        #     # Check if the safe state-action pair keep us safe by a tolerance
+        #     constraint_satisified = l2 >= self.fmin[i] + self.tol * np.sqrt(var2)+self.eta*self.scaling[i]
+        #     constraint_check+=constraint_satisified*1
+        #     # Break as soon as we are at boundary (we do not have the necessary tolerance for all constraints)
+        #     if np.sum(constraint_satisified) == 0:  # No state action pair fulfils constraint with the given tolerance
+        #         break
 
 
-        if np.any(constraint_check==num_constraints-start_constraint):  # If even one state action pair combination fulfilled all constraints with the provided tolerance
+        if np.any(np.sum(constraint_check,axis=1)== num_constraints):  # If even one state action pair combination fulfilled all constraints with the provided tolerance
             at_boundary = False
 
         # Return a safe action (here the action which maximizes the lowerbound of the reward is returned)
         # and update boundary index
         if at_boundary:
             # For simplicity function value f for [x,a] is not calculated, rather value for [x_close,a] is used
-            l2=self.Q[self.S,0].T
-            l2=l2[safe_idx]
+            #l2=self.Q[self.S,0].T
+            #l2=l2[safe_idx]
             #mean2, var2 = self.gps[0].predict_noiseless(input)
             #l2 = mean2 - beta * np.sqrt(var2)
-            max_id = np.argmax(l2)
+            max_id = np.argmax(l2[:,0])
 
             # Remove all contexts from the parameter space
             param_without_context = input[max_id, :-self.num_contexts or None]
@@ -2042,7 +2064,7 @@ class GoSafe(SafeOpt):
             # Collect the lower and upper bound to check if it would still lie at the boundary.
             l2=self.Q[self.S, ::2][state_idx,:]
             u2=self.Q[self.S,1::2][state_idx,:]
-            constraint_check=l2 >= self.fmin + self.tol * np.sqrt(u2-l2) + self.eta
+            constraint_check=l2 >= self.fmin + self.tol * np.sqrt(u2-l2) + self.eta*self.scaling
 
             # If the state is no more at the boundary, remove it from the GP
             if np.any(np.sum(constraint_check,axis=1)== num_constraints):
@@ -2057,8 +2079,8 @@ class GoSafe(SafeOpt):
                 for gp in self.gps:
                     Y=gp.Y
                     Y=np.delete(Y,idx,0)
-
                     gp.set_XY(X, Y)
+
                 self._y = np.delete(self._y, idx, 0)
 
 
