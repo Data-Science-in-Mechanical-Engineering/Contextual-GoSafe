@@ -1618,7 +1618,9 @@ class GoSafe(SafeOpt):
                 self.G[:] = False
                 self.M[:] = False
 
-                s = np.logical_and(self.S,~self.x_0_idx) # Consider all IC which are not x_0 but safe
+                s=self.S
+                #s = np.logical_and(self.S,~self.x_0_idx) # Consider all IC which are not x_0 but safe
+
                 # Check if we should do S2: the variance for any potential query point is greater than epsilon
                 var_G = np.max((u[s, start_constraint:num_constraints] - l[s, start_constraint:num_constraints]) / self.scaling[start_constraint:num_constraints], axis=1)
                 do_S2=np.any(var_G>self.eps)
