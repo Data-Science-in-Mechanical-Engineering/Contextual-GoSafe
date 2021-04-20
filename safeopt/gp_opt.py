@@ -24,7 +24,7 @@ from .swarm import SwarmOptimization
 import logging
 
 
-__all__ = ['SafeOpt', 'SafeOptSwarm',"GoSafe"]
+__all__ = ['SafeOpt', 'SafeOptSwarm',"GoSafe","GoSafeSwarm"]
 
 
 class GaussianProcessOptimization(object):
@@ -778,7 +778,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
     """
 
     def __init__(self, gp, fmin, bounds, beta=2, scaling='auto', threshold=0,
-                 swarm_size=20):
+                 swarm_size=20,define_swarms=True):
         """Initialization, see `SafeOptSwarm`."""
         super(SafeOptSwarm, self).__init__(gp,
                                            fmin=fmin,
@@ -787,7 +787,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
                                            threshold=threshold,
                                            scaling=scaling)
 
-        # Safe set
+        # Safe set -> contains positions of the parameters
         self.S = np.asarray(self.gps[0].X)
 
         self.swarm_size = swarm_size
@@ -800,20 +800,24 @@ class SafeOptSwarm(GaussianProcessOptimization):
 
         # These are estimates of the best lower bound, and its location
         self.best_lower_bound = -np.inf
+        # First point in the initial safe set is our greed point
         self.greedy_point = self.S[0, :]
 
+        # Finds velocities for swarm optimization for each parameter and GP
         self.optimal_velocities = self.optimize_particle_velocity()
 
         swarm_types = ['greedy', 'maximizers', 'expanders']
 
-        self.swarms = {swarm_type:
-                       SwarmOptimization(
-                           swarm_size,
-                           self.optimal_velocities,
-                           partial(self._compute_particle_fitness,
-                                   swarm_type),
-                           bounds=self.bounds)
-                       for swarm_type in swarm_types}
+        if define_swarms:
+            # Define the 3 swarms, greedy, maximizers and expanders
+            self.swarms = {swarm_type:
+                           SwarmOptimization(
+                               swarm_size,
+                               self.optimal_velocities,
+                               partial(self._compute_particle_fitness,
+                                       swarm_type),
+                               bounds=self.bounds)
+                           for swarm_type in swarm_types}
 
     def optimize_particle_velocity(self):
         """Optimize the velocities of the particles.
@@ -826,6 +830,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
         velocities: ndarray
             The estimated optimal velocities in each direction.
         """
+
         parameters = np.zeros((1, self.gp.input_dim), dtype=np.float)
         velocities = np.empty((len(self.gps), self.gp.input_dim),
                               dtype=np.float)
@@ -843,7 +848,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
                 while True:
                     mid = (upper_velocity + lower_velocity) / 2
                     tmp_velocities[0, j] = mid
-
+                    # Calculates k(parameters,tmp_velocities); -> As stationary kernel k(x,x+d) = k(0,d)
                     kernel_matrix = gp.kern.K(parameters, tmp_velocities)
                     covariance = kernel_matrix.squeeze() / self.scaling[i] ** 2
 
@@ -2140,6 +2145,781 @@ class GoSafe(SafeOpt):
         self._y = self._y[:-1, :]
 
         self._bounadry_data_points=self._bounadry_data_points[:-1,:]
+
+
+class GoSafeSwarm(SafeOptSwarm):
+
+    def __init__(self, gp, fmin, bounds,x_0,beta=2, scaling='auto', threshold=0,
+                 swarm_size=20,max_S1_steps=30,max_S2_steps=50,max_S3_steps=30,tol=0.3,eta=0.7,eps=0.05):
+
+        #Initialize all SafeOptSwarm params
+        super(GoSafeSwarm, self).__init__(gp=gp,
+                                          fmin=fmin,
+                                          bounds=bounds,
+                                          beta=beta,
+                                          scaling=scaling,
+                                          threshold=threshold,
+                                          swarm_size=swarm_size,
+                                          define_swarms=False)
+
+
+        # Dimension of the state
+        self.state_dim=np.shape(x_0)[0]
+        self.S1_velocities=self.optimal_velocities.copy()
+        self.state_idx=list(range(self.gp.input_dim-self.state_dim,self.gp.input_dim))
+        self.S1_velocities=self.S1_velocities[:-self.state_dim] #For S1, only look at parameters for the actions
+
+        self.x_0=x_0
+        # For S1, we need maximizers, expanders and greedy (used by maximizers)
+        # As we only look at parameters in the action space, no velocity in
+        # direction of the state is considered
+        S1_swarm_types=['greedy', 'maximizers', 'expanders']
+        self.swarms = {swarm_type:
+            SwarmOptimization(
+                swarm_size,
+                self.S1_velocities,
+                partial(self._compute_particle_fitness,
+                        swarm_type),
+                bounds=[self.bounds[0]])
+            for swarm_type in S1_swarm_types}
+
+        # For S2 we only consider expansions but can have velocities in all
+        # directions (state and action)
+        self.swarms['expanders_S2']=SwarmOptimization(swarm_size,
+                                                     self.optimal_velocities,
+                                                     partial(self._compute_particle_fitness,
+                                                             'expanders_S2'),
+                                                     bounds=self.bounds)
+
+        S3_velocities=self.optimal_velocities.copy()
+        S3_velocities=S3_velocities[:-self.state_dim]
+        S3_velocities=S3_velocities*10
+        self.swarms['S3']=SwarmOptimization(swarm_size,
+                                                     S3_velocities, #We can allow faster velocities for S3
+                                                     partial(self._compute_particle_fitness,
+                                                             'S3'),
+                                                     bounds=[self.bounds[0]])
+
+        self.criterion='init'
+
+        self.greedy_point = self.S[0, :-self.state_dim]
+        unique_safe_states=np.unique(self.S[:,self.state_idx])
+        closest_state_idx = np.argmin(np.linalg.norm(unique_safe_states - self.x_0, axis=1))
+        closest_state=unique_safe_states[closest_state_idx]
+        # All combinations of x_0 in the safe set
+        self.x_0_idx=np.where(np.sum(self.S[:,self.state_idx]==closest_state,axis=1)==self.state_dim)[0]
+        # All combinations of x_0 in the GP
+        self.x_0_idx_gp=self.x_0_idx
+        self.s1_steps=0
+        self.s2_steps=0
+        self.s3_steps=0
+        self.max_S1_steps=max_S1_steps
+        self.max_S2_steps=max_S2_steps
+        self.max_S3_steps=max_S3_steps
+        # switching from S3 to S1
+        self.switch=False
+
+        self.tol=tol
+        self.eta=eta
+        self.Failed_experiment_list=[]
+        self.Failed_state_list=[]
+
+
+        # Set of states considered for S3
+        self.S3_states=np.empty([self.swarm_size,self.state_dim])
+        # Indicator whether data point was added by S3
+        self.set_number=np.zeros(self.S.shape[0],dtype=int)
+        self.S3_x0_ratio=0.7
+        self.current_set_number=0
+        self.eps=eps
+
+        # Indicator if we should check full safe set or gp data for boundary condition
+        self.check_full_data=True
+
+    def _compute_particle_fitness(self, swarm_type, particles):
+        """
+        Return the value of the particles and the safety information.
+
+        Parameters
+        ----------
+        particles : ndarray
+            A vector containing the coordinates of the particles
+        swarm_type : string
+            A string corresponding to the swarm type. It can be any of the
+            following strings:
+
+                * 'greedy' : Optimal value(best lower bound).
+                * 'expander' : Expanders with x_0 fixed (lower bound close to constraint)
+                * 'maximizer' : Maximizers (Upper bound better than best l)
+                * 'expander_S2': Expanders but for all initial conditions
+                * 'safe_set' : Only check the safety of the particles
+        Returns
+        -------
+        values : ndarray
+            The values of the particles
+        global_safe : ndarray
+            A boolean mask indicating safety status of all particles
+            (note that in the case of a greedy swarm, this is not computed and
+            we return a True mask)
+        """
+        beta = self.beta(self.t)
+        # Update particles to include the state for S1
+        if swarm_type in ['greedy', 'maximizers', 'expanders']:
+            # Add state to the particle
+            particles=np.hstack((particles,np.tile(self.x_0,(particles.shape[0],1))))
+        if swarm_type == 'S3':
+            particles=np.hstack((particles,self.S3_states.reshape(-1,1)))
+
+        # classify the particle's function values
+        mean, var = self.gps[0].predict_noiseless(particles)
+        mean = mean.squeeze()
+        std_dev = np.sqrt(var.squeeze())
+
+        # compute the confidence interval
+        lower_bound = np.atleast_1d(mean - beta * std_dev)
+        upper_bound = np.atleast_1d(mean + beta * std_dev)
+
+        # the greedy swarm optimizes for the lower bound
+        if swarm_type == 'greedy':
+            return lower_bound, np.broadcast_to(True, len(lower_bound))
+
+        is_safe = swarm_type == 'safe_set'
+        is_expander = swarm_type == 'expanders'
+        is_maximizer = swarm_type == 'maximizers'
+        is_expander_S2 = swarm_type == 'expanders_S2'
+        is_S3 = swarm_type == 'S3'
+        # value we are optimizing for. Expanders and maximizers seek high
+
+        # variance points-> if the function has no constraints and we are doing S2
+        # dont consider values for f in optimization
+        if (is_expander_S2 or is_S3) and self.fmin[0]==-np.inf:
+            values=np.zeros(len(std_dev))
+        else:
+            values = std_dev / self.scaling[0]
+
+
+
+
+        if is_safe:
+            interest_function = None
+        else:
+            if is_expander or is_expander_S2:
+                # For expanders, the interest function is updated depending on
+                # the lower bounds
+                interest_function = (len(self.gps) *
+                                     np.ones(np.shape(values), dtype=np.float))
+
+            elif is_S3:
+                interest_function = (len(self.gps) *
+                                     np.ones(np.shape(values), dtype=np.float))
+
+                dist=np.square(np.linalg.norm(particles[:,self.state_idx]-self.x_0))
+
+                interest_function*=np.exp(-5*dist)
+                if self.check_full_data:
+                    covariance = self.gp.kern.K(particles,
+                                                np.vstack((self.gps[0].X,self.S)))
+                else:
+                    covariance = self.gp.kern.K(particles,
+                                            self.S)
+
+
+
+                covariance /= self.scaling[0] ** 2
+
+                covariance=np.max(covariance,axis=1)
+
+                interest_function*=np.exp(-5*covariance)
+                if self.Failed_experiment_list:
+
+                    failed_experiments=np.asarray(self.Failed_experiment_list)
+                    failed_experiments=failed_experiments.reshape(-1, particles.shape[1])
+                    covariance = self.gp.kern.K(particles,
+                                                failed_experiments)
+                    covariance /= self.scaling[0] ** 2
+
+                    covariance = np.max(covariance, axis=1)
+
+                    interest_function *= np.exp(-5 * covariance)
+
+                    #dist_min = np.ones(np.shape(values))* np.inf
+                    #for parameter in self.Failed_experiment_list:
+                    #    dist = particles - parameter
+                    #    dist = np.linalg.norm(dist, axis=1)
+                    #    dist_min=np.minimum(dist,dist_min)
+
+                    #interest_function*=np.exp(5*dist_min)/(1+np.exp(5*dist_min))
+
+
+            elif is_maximizer:
+                improvement = upper_bound - self.best_lower_bound
+                interest_function = expit(10 * improvement / self.scaling[0])
+
+            else:
+                # unknown particle type (shouldn't happen)
+                raise AssertionError("Invalid swarm type")
+
+        # boolean mask that tell if the particles are safe according to all gps
+        global_safe = np.ones(particles.shape[0], dtype=np.bool)
+        total_penalty = np.zeros(particles.shape[0], dtype=np.float)
+
+        for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+
+            # Only recompute confidence intervals for constraints
+            if i > 0:
+                # classify using the current GP
+                mean, var = gp.predict_noiseless(particles)
+                mean = mean.squeeze()
+                std_dev = np.sqrt(var.squeeze())
+                lower_bound = mean - beta * std_dev
+                #upper_bound=mean+ beta * std_dev
+                values = np.maximum(values, std_dev / scaling)
+
+            # if the current GP has no safety constrain, we skip it
+            if self.fmin[i] == -np.inf:
+                continue
+            # Dont care about safety of particles for S3
+            if is_S3:
+                continue
+            slack = np.atleast_1d(lower_bound - self.fmin[i])
+            #slack_up=np.atleast_1d(upper_bound - self.fmin[i])
+            # computing penalties
+            global_safe &= slack >= 0
+
+            # Skip cost update for safety evaluation or for S3
+            if is_safe:
+                continue
+
+            # Normalize the slack somewhat
+            slack /= scaling
+            #slack_up /= scaling
+
+            total_penalty += self._compute_penalty(slack)
+
+            if is_expander or is_expander_S2:
+                # check if the particles are expanders for the current gp
+                interest_function *= norm.pdf(slack, scale=0.2)
+                #if is_expander_S2:
+                #    dist=np.linalg.norm(particles[:,self.state_idx]-self.x_0,axis=1)
+                #    interest_function*=np.exp(dist)/(1+np.exp(dist))
+
+        # this swarm type is only interested in knowing whether the particles
+        # are safe.
+        if is_safe:
+            return lower_bound, global_safe
+
+        ind = values <= self.eps
+        values[ind]=0
+        # add penalty
+        values += total_penalty
+
+        # apply the mask for current interest function
+        values *= interest_function
+
+
+        return values, global_safe
+
+    def get_new_query_point(self, swarm_type):
+        """
+        Compute a new point at which to evaluate the function.
+
+        This function relies on a Particle Swarm Optimization (PSO) to find the
+        optimum of the objective function (which depends on the swarm type).
+
+        Parameters
+        ----------
+        swarm_type: string
+            This parameter controls the type of point that should be found. It
+            can take one of the following values:
+
+                * 'expanders' : find a point that increases the safe set
+                * 'maximizers' : find a point that maximizes the objective
+                                 function within the safe set.
+                * 'greedy' : retrieve an estimate of the best currently known
+                             parameters (best lower bound).
+
+        Returns
+        -------
+        global_best: np.array
+            The next parameters that should be evaluated.
+        max_std_dev: float
+            The current standard deviation in the point to be evaluated.
+        """
+        beta = self.beta(self.t)
+        safe_size, input_dim = self.S.shape
+
+        # Make sure the safe set is still safe
+        _, safe = self._compute_particle_fitness('safe_set', self.S)
+
+        num_safe = safe.sum()
+        safe_x0=self.S[self.x_0_idx]
+        safe_x0_size=safe_x0.shape[0]
+        num_x0_safe=safe[self.x_0_idx].sum()
+        if num_x0_safe == 0:
+            raise RuntimeError('The safe set for x0 is empty.')
+
+        # Prune safe set if points in the discrete approximation of the safe
+        # ended up being unsafe, but never prune below swarm size to avoid
+        # empty safe set.
+        if num_safe >= self.swarm_size and num_safe != len(safe):
+            # Warn that the safe set has decreased
+            logging.warning("Warning: {} unsafe points removed. "
+                            "Model might be violated"
+                            .format(np.count_nonzero(~safe)))
+
+            # Remove unsafe points
+
+            self.S = self.S[safe]
+            self.set_number=self.set_number[safe]
+            self.x_0_idx=self.x_0_idx[safe[self.x_0_idx]]
+            safe_x0 = self.S[self.x_0_idx]
+            safe_size = self.S.shape[0]
+            safe_x0_size = safe_x0.shape[0]
+
+        # initialize particles
+        if swarm_type == 'greedy':
+            # we pick particles u.a.r in the safe set
+
+            random_id = np.random.randint(safe_x0_size, size=self.swarm_size - 3)
+            best_sampled_point = np.argmax(self.gp.Y[self.x_0_idx_gp])
+            x_0_actions=self.gp.X[self.x_0_idx_gp]
+            best_sampled_action=x_0_actions[best_sampled_point]
+            last_x_0_point=x_0_actions[-1,:]
+            # Particles are drawn at random from the safe set, but include the
+            # - Previous greedy estimate
+            # - last point
+            # - best sampled point
+            # Note: Particle only consist of safe actions for state x_0
+            particles = np.vstack((safe_x0[random_id, :][:,:-self.state_dim],
+                                   self.greedy_point,
+                                   last_x_0_point[:-self.state_dim],
+                                   best_sampled_action[:-self.state_dim]))
+        else:
+            # we pick particles u.a.r in the safe set
+            # For S2:
+            if swarm_type=="expanders_S2":
+
+                indexes=np.where(self.set_number == self.current_set_number)[0]
+                if len(indexes)>0:
+                    random_id = np.random.choice(indexes, size=self.swarm_size)
+                    current_set = self.current_set_number
+                else:
+                    random_id = np.random.randint(safe_x0_size, size=self.swarm_size)
+                    current_set = np.max(self.set_number)
+                particles = self.S[random_id, :]
+                #particles[:,self.state_idx]=particles[:,self.state_idx]
+
+            elif swarm_type=="S3":
+                size=int(self.swarm_size*self.S3_x0_ratio)
+                random_id = np.random.randint(safe_size, size=self.swarm_size-size)
+
+                self.S3_states=np.zeros([self.swarm_size,self.state_dim])
+                self.S3_states[:size,:]=self.x_0
+                self.S3_states[size:self.swarm_size,:] = self.S[random_id, self.state_idx].reshape(-1,self.state_dim)
+
+                #self.S3_states = self.S3_states.reshape([self.swarm_size,self.state_dim])
+                #action_idx=list(range(0,self.state_dim))
+                # Take any random action
+                bound=np.array(self.bounds)
+                action=np.random.uniform(low=bound[:-self.state_dim,0],high=bound[:-self.state_dim,1],
+                                         size=self.swarm_size)
+                particles=action.reshape(-1,1)
+                current_set=self.current_set_number
+
+
+            # For S1:
+            else:
+
+                indexes=np.where(self.set_number[self.x_0_idx]==self.current_set_number)[0]
+                if len(indexes)>0:
+                    random_id = np.random.choice(indexes, size=self.swarm_size)
+                    current_set = self.current_set_number
+                else:
+                    random_id = np.random.randint(safe_x0_size, size=self.swarm_size)
+                    current_set = np.max(self.set_number[self.x_0_idx])
+
+                particles = safe_x0[random_id, :][:,:-self.state_dim]
+
+
+        # Run the swarm optimization
+        swarm = self.swarms[swarm_type]
+        swarm.init_swarm(particles)
+        swarm.run_swarm(self.max_iters)
+
+        # expand safe set
+        if swarm_type != 'greedy' and swarm_type != 'S3':
+            num_added = 0
+            if swarm_type == 'maximizers' or swarm_type == 'expanders':
+
+                # compute correlation between new candidates and current safe set
+                size_best_pos=swarm.best_positions.shape[0]
+                best_positions=np.hstack((swarm.best_positions,np.tile(self.x_0,(size_best_pos,1))))
+
+                covariance = self.gp.kern.K(best_positions,
+                                        np.vstack((self.S,
+                                                   best_positions)))
+            else:
+                best_positions=swarm.best_positions
+                covariance = self.gp.kern.K(best_positions,
+                                            np.vstack((self.S,
+                                                       best_positions)))
+            covariance /= self.scaling[0] ** 2
+
+            initial_safe = len(self.S)
+            n, m = np.shape(covariance)
+
+            # this mask keeps track of the points that we have added in the
+            # safe set to account for them when adding a new point
+            mask = np.zeros(m, dtype=np.bool)
+            mask[:initial_safe] = True
+
+            for j in range(n):
+                # make sure correlation with old points is relatively low
+                if np.all(covariance[j, mask] <= 0.95):
+                    self.S = np.vstack((self.S, best_positions[[j], :]))
+                    self.set_number=np.vstack((self.set_number,current_set))
+                    # Update index for x_0 if added point corresponds to x_0 IC
+                    if best_positions[[j],self.state_idx]==self.x_0:
+                        # added point corresponds to initial condition x_0
+                        self.x_0_idx=np.append(self.x_0_idx,[len(self.S)-1])
+                    num_added += 1
+                    mask[initial_safe + j] = True
+
+            logging.debug("At the end of swarm {}, {} points were appended to"
+                          " the safeset".format(swarm_type, num_added))
+
+        elif swarm_type=='greedy':
+            # check whether we found a better estimate of the lower bound
+            greedy_point=np.hstack((self.greedy_point[None, :],self.x_0))
+            mean, var = self.gp.predict_noiseless(greedy_point)
+            mean = mean.squeeze()
+            std_dev = np.sqrt(var.squeeze())
+
+            lower_bound = mean - beta * std_dev
+            if lower_bound < np.max(swarm.best_values):
+                self.greedy_point = swarm.global_best.copy()
+
+        #if swarm_type == 'greedy':
+            return swarm.global_best.copy(), np.max(swarm.best_values)
+
+        elif swarm_type=='S3':
+            var = np.empty(len(self.gps), dtype=np.float)
+            best_state_idx=np.argmax(swarm.best_values)
+            state=np.asarray([self.S3_states[best_state_idx,:]])
+            global_best=np.hstack((swarm.global_best[None, :],state))
+            for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+                var[i] = gp.predict_noiseless(global_best)[1]
+
+            return global_best,np.sqrt(var)
+
+        # compute the variance of the point picked
+        var = np.empty(len(self.gps), dtype=np.float)
+        # max_std_dev = 0.
+
+
+
+
+        if swarm_type == 'maximizers' or swarm_type == 'expanders':
+            global_best=np.hstack((swarm.global_best[None, :],self.x_0))
+        else:
+            global_best=swarm.global_best[None, :]
+        for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+            var[i] = gp.predict_noiseless(global_best)[1]
+
+        return swarm.global_best, np.sqrt(var)
+
+
+
+    def optimize(self, ucb=False):
+        """Run Safe Bayesian optimization and get the next parameters.
+
+        Parameters
+        ----------
+        ucb: bool
+            Whether to only compute maximizers (best upper bound).
+
+        Returns
+        -------
+        x: np.array
+            The next parameters that should be evaluated.
+        """
+        # compute estimate of the lower bound
+        self.greedy, self.best_lower_bound = self.get_new_query_point('greedy')
+
+        if self.s1_steps<self.max_S1_steps:
+            self.criterion="S1"
+            self.switch=False
+            self.s1_steps+=1
+            # Run both swarms:
+            x_maxi, std_maxi = self.get_new_query_point('maximizers')
+            if ucb:
+                logging.info('Using ucb criterion.')
+                return x_maxi
+
+            x_exp, std_exp = self.get_new_query_point('expanders')
+
+            # Remove expanders below threshold or without safety constraint.
+            std_exp[(std_exp < self.threshold) | (self.fmin == -np.inf)] = 0
+
+            # Apply scaling
+            std_exp /= self.scaling
+            std_exp = np.max(std_exp)
+
+            std_maxi = std_maxi[0] / self.scaling[0]
+
+            if max(std_exp,std_maxi)>self.eps:
+                logging.info("The best maximizer has std. dev. %f" % std_maxi)
+                logging.info("The best expander has std. dev. %f" % std_exp)
+                logging.info("The greedy estimate of lower bound has value %f" %
+                             self.best_lower_bound)
+
+                if std_maxi > std_exp:
+                    return np.hstack((x_maxi.reshape(-1,1),self.x_0))#np.asarray([x_maxi[0],self.x_0[0]])
+                else:
+                    return np.hstack((x_exp.reshape(-1,1),self.x_0))
+
+
+
+        if self.s2_steps < self.max_S2_steps:
+            self.s2_steps+=1
+            self.s1_steps = 0
+            self.criterion = "S2"
+            x_exp, std_exp = self.get_new_query_point('expanders_S2')
+            std_exp /= self.scaling
+            std_exp = np.max(std_exp)
+            if std_exp>self.eps:
+                logging.info("The best expander (S2) has std. dev. %f" % std_exp)
+                return x_exp
+
+
+
+
+
+        self.criterion = "S3"
+        if self.s3_steps==0:
+            self.current_set_number+=1
+        self.s3_steps += 1
+        self.switch= self.s3_steps>=self.max_S3_steps
+        if self.switch:
+            self.s1_steps=0
+            self.s2_steps = 0
+            self.s3_steps=0
+
+
+
+        x_exp, std_exp = self.get_new_query_point('S3')
+        std_exp /= self.scaling
+        std_exp = np.max(std_exp)
+        logging.info("The best S3 point has std. dev. %f" % std_exp)
+        return x_exp
+
+
+    def get_maximum(self):
+        """
+        Return the current estimate for the maximum.
+
+        Returns
+        -------
+        x : ndarray
+            Location of the maximum
+        y : 0darray
+            Maximum value
+
+        """
+        maxi = np.argmax(self.gp.Y[self.x_0_idx_gp])
+        return self.gp.X[self.x_0_idx_gp, :-self.state_dim][maxi,:], self.gp.Y[self.x_0_idx_gp, :][maxi,:]
+
+
+
+    def add_new_data_point(self, x, y, context=None):
+        """
+        Add a new function observation to the GPs.
+
+        Parameters
+        ----------
+        x: 2d-array
+        y: 2d-array
+        context: array_like
+            The context(s) used for the data points.
+        """
+        if self.criterion=="S3":
+            self.S = np.vstack((self.S, x))
+            self.set_number = np.vstack((self.set_number, self.current_set_number))
+            if x[0][self.state_idx] == self.x_0:
+                # added point corresponds to initial condition x_0
+                self.x_0_idx = np.append(self.x_0_idx, [len(self.S) - 1])
+            #self.s1_steps=0
+
+        x = np.atleast_2d(x)
+        y = np.atleast_2d(y)
+
+        if self.num_contexts:
+            x = self._add_context(x, context)
+
+        for i, gp in enumerate(self.gps):
+            not_nan = ~np.isnan(y[:, i])
+            if np.any(not_nan):
+                # Add data to GP (context already included in x)
+                self._add_data_point(gp, x[not_nan, :], y[not_nan, [i]])
+
+        # Update global data stores
+        self._x = np.concatenate((self._x, x), axis=0)
+        self._y = np.concatenate((self._y, y), axis=0)
+
+
+
+        if self.criterion=='S1':
+
+            self.x_0_idx_gp = np.append(self.x_0_idx_gp, [self.gps[0].X.shape[0] - 1])
+
+        elif sum(x[0][self.state_idx]==self.x_0)==self.state_dim:
+
+            self.x_0_idx_gp = np.append(self.x_0_idx_gp, [self.gps[0].X.shape[0] - 1])
+
+
+    def check_rollout(self,state,action):
+
+        at_boundary=False
+        Fail=False
+        if self.criterion=="S3":
+            at_boundary,Fail,a=self.at_boundary(state)
+
+        if not at_boundary:
+            a=action
+
+
+        return at_boundary,Fail,a
+
+    def at_boundary(self,state):
+
+        beta = self.beta(self.t)
+
+        at_boundary=False
+        Fail=False
+        action = None
+
+        if self.check_full_data:
+            # unique_safe_states = np.unique(self.S[:, self.state_idx])
+            full_data=np.vstack((self.gps[0].X,self.S))
+            diff = np.linalg.norm(full_data[:, self.state_idx]- state, axis=1)
+            closest_states_idx = np.where(diff == diff.min())[0]
+            closest_states = full_data[closest_states_idx, :]
+            closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+
+            # Check if applying other actions guarantee safety
+            alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(full_data)[1]])
+            alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
+            alternative_options[:, self.state_idx] = state
+
+        else:
+            # unique_safe_states = np.unique(self.S[:, self.state_idx])
+            diff=np.linalg.norm(self.S[:, self.state_idx] - state, axis=1)
+            closest_states_idx = np.where(diff==diff.min())[0]
+            closest_states=self.S[closest_states_idx,:]
+            closest_states = closest_states.reshape(-1, np.shape(self.S)[1])
+
+            # Check if applying other actions guarantee safety
+            alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(self.S)[1]])
+            alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
+            alternative_options[:, self.state_idx] = state
+
+        for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+            mean, var = gp.predict_noiseless(alternative_options)
+            mean = mean.squeeze()
+            std_dev = np.sqrt(var.squeeze())
+            lower_bound = np.atleast_1d(mean - beta * std_dev)
+
+            # If false, we satisfy constraints with a good tolerance
+            at_boundary= np.all(lower_bound-self.fmin[i]-self.tol*std_dev-self.eta*scaling<0)
+
+            if at_boundary:
+                self.Failed_state_list.append(state)
+                covariance=gp.kern.K(closest_states,alternative_options)/scaling
+
+                if np.all(covariance < 0.95**2):  # cutoff for checking if the state can give any information about our current one
+                    Fail=True
+
+                else:
+
+                    # Pick any random action for this state
+                    random_id=np.random.randint(np.shape(alternative_options)[0],size=1)
+                    action=alternative_options[random_id,:-self.state_dim]
+
+                break
+
+        return at_boundary,Fail,action
+
+    def add_boundary_points(self,x):
+        self.Failed_experiment_list.append(x)
+
+
+    def update_boundary_points(self):
+
+        if self.Failed_experiment_list:
+            beta=self.beta(self.t)
+
+            if self.check_full_data:
+                for i,state in enumerate(self.Failed_state_list):
+
+                    # unique_safe_states = np.unique(self.S[:, self.state_idx])
+                    full_data = np.vstack((self.gps[0].X, self.S))
+                    diff = np.linalg.norm(full_data[:, self.state_idx] - state, axis=1)
+                    closest_states_idx = np.where(diff == diff.min())[0]
+                    closest_states = full_data[closest_states_idx, :]
+                    closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+
+                    # Check if applying other actions guarantee safety
+                    alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(full_data)[1]])
+                    alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
+                    alternative_options[:, self.state_idx] = state
+
+                    for j, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+                        mean, var = gp.predict_noiseless(alternative_options)
+                        mean = mean.squeeze()
+                        std_dev = np.sqrt(var.squeeze())
+                        lower_bound = np.atleast_1d(mean - beta * std_dev)
+
+                        # If false, we satisfy constraints with a good tolerance
+                        at_boundary = np.all(lower_bound - self.fmin[j] - self.tol * std_dev - self.eta * scaling < 0)
+
+                        if at_boundary:
+                            continue
+
+                    if not at_boundary:
+                        self.Failed_experiment_list.pop(i)
+                        self.Failed_state_list.pop(i)
+
+
+
+            else:
+                for i,state in enumerate(self.Failed_state_list):
+
+                    # unique_safe_states = np.unique(self.S[:, self.state_idx])
+                    diff = np.linalg.norm(self.S[:, self.state_idx] - state, axis=1)
+                    closest_states_idx = np.where(diff == diff.min())[0]
+                    closest_states = self.S[closest_states_idx, :]
+                    closest_states = closest_states.reshape(-1, np.shape(self.S)[1])
+
+                    # Check if applying other actions guarantee safety
+                    alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(self.S)[1]])
+                    alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
+                    alternative_options[:, self.state_idx] = state
+
+                    for j, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+                        mean, var = gp.predict_noiseless(alternative_options)
+                        mean = mean.squeeze()
+                        std_dev = np.sqrt(var.squeeze())
+                        lower_bound = np.atleast_1d(mean - beta * std_dev)
+
+                        # If false, we satisfy constraints with a good tolerance
+                        at_boundary = np.all(lower_bound - self.fmin[j] - self.tol * std_dev - self.eta * scaling < 0)
+
+                        if at_boundary:
+                            continue
+
+                    if not at_boundary:
+                        self.Failed_experiment_list.pop(i)
+                        self.Failed_state_list.pop(i)
 
 
 
