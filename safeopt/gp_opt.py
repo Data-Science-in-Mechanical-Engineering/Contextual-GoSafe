@@ -2233,7 +2233,7 @@ class GoSafeSwarm(SafeOptSwarm):
     """
 
     def __init__(self, gp, fmin, bounds,x_0,beta=2, scaling='auto', threshold=0,
-                 swarm_size=20,max_S1_steps=30,max_S2_steps=50,max_S3_steps=30,tol=0.3,eta=0.7,eps=0.05):
+                 swarm_size=20,max_S1_steps=30,max_S2_steps=50,max_S3_steps=30,tol=0.3,eta=0.7,eps=0.1,S3_x0_ratio=0.7,max_data_size=400,reset_size=200,boundary_ratio=0.7):
 
         #Initialize all SafeOptSwarm params
         super(GoSafeSwarm, self).__init__(gp=gp,
@@ -2330,7 +2330,7 @@ class GoSafeSwarm(SafeOptSwarm):
         # and it is encouraged to draw points from the current safe set -> Ensures we pursue new safe sets as soon as we get their info
         self.set_number=np.zeros(self.S.shape[0],dtype=int)
         # Ratio tells how many of the initial safe states for S3 should be x_0
-        self.S3_x0_ratio=0.5
+        self.S3_x0_ratio=S3_x0_ratio
         self.current_set_number=0
 
         self.eps=eps
@@ -2338,10 +2338,13 @@ class GoSafeSwarm(SafeOptSwarm):
         # Indicator if we should check full safe set and gp data for boundary condition
         self.check_full_data=True
 
+        self.safety_cutoff=0.95
 
-        self.data_size_max = 400
-        self.N_reset=200
-        self.boundary_ratio=0.6
+        self.data_size_max = max_data_size
+        self.N_reset=reset_size
+        self.boundary_ratio=boundary_ratio
+
+        self.lower_bound=np.ones([self.S.shape[0],len(self.gps)])*-np.inf
 
     def _compute_particle_fitness(self, swarm_type, particles):
         """
@@ -2398,7 +2401,9 @@ class GoSafeSwarm(SafeOptSwarm):
         is_expander_S2 = swarm_type == 'expanders_S2'
         is_S3 = swarm_type == 'S3'
         # value we are optimizing for. Expanders and maximizers seek high
-
+        if is_safe:
+            self.lower_bound[:,0]=np.maximum(self.lower_bound[:,0],lower_bound)
+            lower_bound=self.lower_bound[:,0]
         # variance points-> if the function has no constraints and we are doing S2
         # dont consider values for f in optimization
         if (is_expander_S2 or is_S3) and self.fmin[0]==-np.inf:
@@ -2422,9 +2427,9 @@ class GoSafeSwarm(SafeOptSwarm):
                 interest_function = (len(self.gps) *
                                      np.ones(np.shape(values), dtype=np.float))
                 # Find distance between particle state and x_0
-                dist=np.square(np.linalg.norm(particles[:,self.state_idx]-self.x_0))
+                #dist=np.square(np.linalg.norm(particles[:,self.state_idx]-self.x_0))
                 # Penalize large distances -> Encourages particles with states close to x_0
-                interest_function*=np.exp(-5*dist)
+                #interest_function*=np.exp(-5*dist)
                 # Determine covariance between particles and safe set
                 if self.check_full_data:
                     covariance = self.gp.kern.K(particles,
@@ -2483,6 +2488,9 @@ class GoSafeSwarm(SafeOptSwarm):
                 mean = mean.squeeze()
                 std_dev = np.sqrt(var.squeeze())
                 lower_bound = mean - beta * std_dev
+                if is_safe:
+                    self.lower_bound[:, i] = np.maximum(self.lower_bound[:, i], lower_bound)
+                    lower_bound=self.lower_bound[:, i]
                 #upper_bound=mean+ beta * std_dev
                 values = np.maximum(values, std_dev / scaling)
 
@@ -2503,26 +2511,22 @@ class GoSafeSwarm(SafeOptSwarm):
 
             # Normalize the slack somewhat
             slack /= scaling
-            #slack_up /= scaling
 
             total_penalty += self._compute_penalty(slack)
 
             if is_expander or is_expander_S2:
                 # check if the particles are expanders for the current gp
                 interest_function *= norm.pdf(slack, scale=0.2)
-                #if is_expander_S2:
-                #    dist=np.linalg.norm(particles[:,self.state_idx]-self.x_0,axis=1)
-                #    interest_function*=np.exp(dist)/(1+np.exp(dist))
+
 
         # this swarm type is only interested in knowing whether the particles
         # are safe.
         if is_safe:
-
             return lower_bound, global_safe
         # Set particle values for particles with uncertainty less than epsilon to 0.
         # Avoids sampling particles which we are certain of
-        ind = values <= self.eps
-        values[ind]=0
+        #ind = values < self.eps
+        #values[ind]=0
         # add penalty
         values += total_penalty
 
@@ -2566,6 +2570,8 @@ class GoSafeSwarm(SafeOptSwarm):
         # Make sure the safe set is still safe
         _, safe = self._compute_particle_fitness('safe_set', self.S)
 
+
+
         num_safe = safe.sum()
         # Get points from safe set for x_0
         safe_x0=self.S[self.x_0_idx]
@@ -2585,6 +2591,7 @@ class GoSafeSwarm(SafeOptSwarm):
 
             # Remove unsafe points
             self.S = self.S[safe]
+            self.lower_bound=self.lower_bound[safe]
             self.set_number=self.set_number[safe]
             self.x_0_idx=np.where(np.sum(self.S[:,self.state_idx]==self.x_0,axis=1)==self.state_dim)[0]
             safe_x0 = self.S[self.x_0_idx,:]
@@ -2597,8 +2604,8 @@ class GoSafeSwarm(SafeOptSwarm):
             # we pick particles u.a.r in the safe set for x_0
 
             random_id = np.random.randint(safe_x0_size, size=self.swarm_size - 3)
-            best_sampled_point = np.argmax(self.gp.Y[self.x_0_idx_gp])
-            x_0_actions=self.gp.X[self.x_0_idx_gp]
+            best_sampled_point = np.argmax(self._y[self.x_0_idx_gp_full_data,0])
+            x_0_actions=self._x[self.x_0_idx_gp_full_data]
             best_sampled_action=x_0_actions[best_sampled_point]
             last_x_0_point=x_0_actions[-1,:]
             # Particles are drawn at random from the safe set, but include the
@@ -2623,11 +2630,15 @@ class GoSafeSwarm(SafeOptSwarm):
                     current_set = self.current_set_number
                 else:
                     # Else sample from the previous safe set
-                    random_id = np.random.randint(safe_size, size=self.swarm_size)
-                    # Indicate from which set the points were sampled
                     current_set = np.max(self.set_number)
+                    indexes=np.where(self.set_number == current_set)[0]
+                    random_id = np.random.choice(indexes, size=self.swarm_size)
+
+
                 particles = self.S[random_id, :]
-                #particles[:,self.state_idx]=particles[:,self.state_idx]
+                if np.all(np.sum(particles[:,self.state_idx]==self.x_0,axis=1)==self.state_dim):
+                    u=np.random.uniform(-1,1,size=[self.swarm_size,1])
+                    particles[:,self.state_idx]=particles[:,self.state_idx]+u*self.optimal_velocities[1]
 
             elif swarm_type=="S3":
                 # Find how many points with IC x_0 should we use for S3
@@ -2674,7 +2685,7 @@ class GoSafeSwarm(SafeOptSwarm):
                         idx = np.argmax(covariance, axis=1)
                         covariance=np.max(covariance,axis=1)
 
-                        idx_2=np.where(covariance>=0.95**2)[0]
+                        idx_2=np.where(covariance>=self.safety_cutoff)[0]
                         if len(idx_2)>0:
                             random_id = np.random.choice(idx_2, size=self.swarm_size)
                             particles=points[idx,:]
@@ -2682,13 +2693,14 @@ class GoSafeSwarm(SafeOptSwarm):
                             particles=particles[:,:-self.state_dim]
                             current_set = self.current_set_number
                         else:
-                            random_id = np.random.randint(safe_x0_size, size=self.swarm_size)
                             current_set = np.max(self.set_number[self.x_0_idx])
+                            indexes = np.where(self.set_number[self.x_0_idx] == current_set)[0]
+                            random_id = np.random.choice(indexes, size=self.swarm_size)
                             particles = safe_x0[random_id, :][:, :-self.state_dim]
-
                     else:
-                        random_id = np.random.randint(safe_x0_size, size=self.swarm_size)
                         current_set = np.max(self.set_number[self.x_0_idx])
+                        indexes = np.where(self.set_number[self.x_0_idx] == current_set)[0]
+                        random_id = np.random.choice(indexes, size=self.swarm_size)
                         particles = safe_x0[random_id, :][:, :-self.state_dim]
 
 
@@ -2730,6 +2742,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 # make sure correlation with old points is relatively low
                 if np.all(covariance[j, mask] <= 0.95):
                     self.S = np.vstack((self.S, best_positions[[j], :]))
+                    self.lower_bound=np.vstack((self.lower_bound,np.ones([1,len(self.gps)])*-np.inf))
                     # Safe indicator of which set the point belongs to
                     self.set_number=np.vstack((self.set_number,current_set))
                     # Update index for x_0 if added point corresponds to x_0 IC
@@ -2799,12 +2812,12 @@ class GoSafeSwarm(SafeOptSwarm):
             The next parameters that should be evaluated.
         """
 
-        if self.gps[0].X.shape[0]-self.gps[0].X[self.x_0_idx,:].shape[0]>=self.data_size_max:
-            self.select_gp_subset()
 
         # compute estimate of the lower bound
         self.greedy, self.best_lower_bound = self.get_new_query_point('greedy')
 
+        if self.gps[0].X.shape[0]-self.gps[0].X[self.x_0_idx_gp,:].shape[0]>=self.data_size_max:
+            self.select_gp_subset()
         # Check if we have exceeded maximum number of steps for S1, if yes go to S2
         if self.s1_steps<self.max_S1_steps:
             self.criterion="S1"
@@ -2825,7 +2838,7 @@ class GoSafeSwarm(SafeOptSwarm):
             std_exp = np.max(std_exp)
 
             std_maxi = std_maxi[0] / self.scaling[0]
-
+            std_maxi = np.max(std_maxi)
             # Check if we have greater than eps uncertainty, if not go to S2
             if max(std_exp,std_maxi)>self.eps:
                 logging.info("The best maximizer has std. dev. %f" % std_maxi)
@@ -2833,7 +2846,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 logging.info("The greedy estimate of lower bound has value %f" %
                              self.best_lower_bound)
 
-                if std_maxi > std_exp:
+                if std_maxi >= std_exp:
                     return np.hstack((x_maxi.reshape(-1,1),self.x_0))#np.asarray([x_maxi[0],self.x_0[0]])
                 else:
                     return np.hstack((x_exp.reshape(-1,1),self.x_0))
@@ -2853,7 +2866,7 @@ class GoSafeSwarm(SafeOptSwarm):
             std_exp /= self.scaling
             std_exp = np.max(std_exp)
             # If uncertainty is less than eps, go to S3
-            if std_exp>self.eps:
+            if std_exp>= self.eps:
                 logging.info("The best expander (S2) has std. dev. %f" % std_exp)
                 return x_exp
 
@@ -2919,6 +2932,7 @@ class GoSafeSwarm(SafeOptSwarm):
         if self.criterion=="S3":
             # Add data point to the safe set
             self.S = np.vstack((self.S, x))
+            self.lower_bound=np.vstack((self.lower_bound,np.ones([1,len(self.gps)])*-np.inf))
             # Update step counters to run S1,S2 again
             self.s3_steps=0
             self.s1_steps=0
@@ -3080,7 +3094,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 # Check if the current state and the closest safe state are close enough, if not mark experiment as failed
                 covariance=gp.kern.K(closest_states,alternative_options)/scaling
 
-                if np.all(covariance < 0.95**2):  # cutoff for checking if the state can give any information about our current one
+                if np.all(covariance < self.safety_cutoff):  # cutoff for checking if the state can give any information about our current one
                     Fail=True
 
                 else:
@@ -3180,68 +3194,147 @@ class GoSafeSwarm(SafeOptSwarm):
                         self.Failed_experiment_list.pop(i)
                         self.Failed_state_list.pop(i)
 
-    def select_gp_subset(self):
-
+    def select_gp_subset(self,method=2):
+        """""
+                   
+                   Used to reduce computational complexity of inference.
+                   method: int
+                        This parameter controls the method we use for picking our data points:
+            
+                            * 1 : Runs swarm optimization with 300 particles and selections self.boundary_ratio*N_reset
+                                  unique points which have high covariance with the particles obtained from swarm 
+                                  optimization. These are considered as boundary particles. Remaining particles are
+                                  picked to be the  ones with low covariance with the particles obtained from swarm
+                                  optimization. These are considered to be interior particles
+                            * 2 : Evaluates exp(-5*ln^2)sigma_n for each point collected so far, picks self.boundary_ration*N_reset
+                                  points with the largest values and the remaining points are chosen at random from the dataset
+                                  
+         """""
+        # Find all points with IC other than x_0
         X = self._x
         Y=self._y
         idx_rest = [x for x in list(range(X.shape[0])) if x not in self.x_0_idx_gp_full_data]
 
+        # Check if non x_0 points are greater than N_reset
         if len(idx_rest)> self.N_reset:
-            set_size=int(self.N_reset*self.boundary_ratio)
-            interior_size=self.N_reset-set_size
-            expander_points=self.get_boundary_particles(total_size=300)
-            X=X[idx_rest,:]
-            Y=Y[idx_rest,:]
-            covariance=self.gp.kern.K(expander_points,X)
-            covariance /= self.scaling[0] ** 2
-            idx_boundary=np.argmax(covariance,axis=1)
-            idx_boundary=np.unique(idx_boundary)
-            idx_boundary=idx_boundary.reshape(-1,1)
-            idx_interior=np.argmin(covariance,axis=1)
-            idx_interior=np.unique(idx_interior)
-            idx_interior = [x for x in list(idx_interior) if x not in list(idx_boundary)]
-            idx_interior = np.asarray(idx_interior)
-            idx_interior=idx_interior.reshape(-1,1)
-            covariance_rankings=np.argsort(np.argsort(covariance))
-            n_points=X.shape[0]
-            for i in range(1,n_points):
-                if len(idx_boundary)>= set_size and len(idx_interior)>=interior_size:
-                    break
+            #Define boundary and interior set sizes
+            set_size = int(self.N_reset * self.boundary_ratio)
+            interior_size = self.N_reset - set_size
+            X = X[idx_rest, :]
+            Y = Y[idx_rest, :]
+            if method==1:
+                # Get expander points
+                expander_points=self.get_boundary_particles(total_size=300)
 
-                if len(idx_boundary)<set_size:
-                    rows,idx=np.where(covariance_rankings==i+1)
-                    idx=np.unique(idx)
-                    idx_boundary=np.vstack((idx_boundary,idx.reshape(-1,1)))
-                    idx_boundary=np.unique(idx_boundary)
-                    idx_boundary = [x for x in list(idx_boundary) if x not in list(idx_interior)]
-                    idx_boundary=np.asarray(idx_boundary)
-                    idx_boundary=idx_boundary.reshape(-1,1)
+                # determine covariance between full data (with ic other than x_0) and expander points
+
+                covariance=self.gp.kern.K(expander_points,X)
+                covariance /= self.scaling[0] ** 2
+
+                # Find unique points with the highest covariance -> Boundary points
+                idx_boundary=np.argmax(covariance,axis=1)
+                idx_boundary=np.unique(idx_boundary)
+                idx_boundary=idx_boundary.reshape(-1,1)
+                # Find unique points with the lowest covariance -> Boundary points
+                idx_interior=np.argmin(covariance,axis=1)
+                idx_interior=np.unique(idx_interior)
+                # Make sure we exclude points at the boundary from those in the interior
+                idx_interior = [x for x in list(idx_interior) if x not in list(idx_boundary)]
+                idx_interior = np.asarray(idx_interior)
+                idx_interior=idx_interior.reshape(-1,1)
+
+                # Get covariance ranking matrix
+                covariance_rankings=np.argsort(np.argsort(covariance))
+                n_points=X.shape[0]
+
+                # Loop over all candidate to select subset
+                for i in range(1,n_points):
+                    # If enough data points for the boundary and interior have been selected, exit the loop
+                    if len(idx_boundary)>= set_size and len(idx_interior)>=interior_size:
+                        break
+                    # If more boundary points are required, pick those which have a high covariance with the expanders
+                    # High rank
+                    if len(idx_boundary)<set_size:
+                        rows,idx=np.where(covariance_rankings==i+1)
+                        idx=np.unique(idx)
+                        # Add new points to the boundary idx, make sure they do not contain any points from the interior and
+                        # are all unique
+                        idx_boundary=np.vstack((idx_boundary,idx.reshape(-1,1)))
+                        idx_boundary=np.unique(idx_boundary)
+                        idx_boundary = [x for x in list(idx_boundary) if x not in list(idx_interior)]
+                        idx_boundary=np.asarray(idx_boundary)
+                        idx_boundary=idx_boundary.reshape(-1,1)
+
+                    # If more interior points are required, pick those which have a low covariance with the expanders
+                    # low rank
+                    if len(idx_interior)<interior_size:
+                        rows,idx = np.where(covariance_rankings == n_points - i - 1)
+                        idx = np.unique(idx)
+                        # Add new points to the interior idx, make sure they do not contain any points from the boundary and
+                        # are all unique
+                        idx_interior=np.vstack((idx_interior,idx.reshape(-1,1)))
+                        idx_interior=np.unique(idx_interior)
+                        idx_interior=[x for x in list(idx_interior) if x not in list(idx_boundary)]
+                        idx_interior=np.asarray(idx_interior)
+                        idx_interior=idx_interior.reshape(-1,1)
 
 
-                if len(idx_interior)<interior_size:
-                    rows,idx = np.where(covariance_rankings == n_points - i - 1)
-                    idx = np.unique(idx)
-                    idx_interior=np.vstack((idx_interior,idx.reshape(-1,1)))
-                    idx_interior=np.unique(idx_interior)
-                    idx_interior=[x for x in list(idx_interior) if x not in list(idx_boundary)]
-                    idx_interior=np.asarray(idx_interior)
-                    idx_interior=idx_interior.reshape(-1,1)
+
+                # Define the set of all points ( points with ic x_0 + boundary + interior)
+                idx_full=np.vstack((idx_boundary,idx_interior))
+                X_full=X[idx_full,:]
+                X_full=X_full.squeeze()
+                X_full = np.vstack((self._x[self.x_0_idx_gp_full_data,:],X_full))
+
+                Y_full=Y[idx_full,:]
+                Y_full = Y_full.squeeze()
+                Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :],Y_full))
+
+            elif method==2:
+                # Method:
+                # Evaluate objective function for each data point
+                beta=self.beta(self.t)
+                interest_function = (len(self.gps) *
+                                     np.ones(X.shape[0], dtype=np.float))
+                values=np.zeros(X.shape[0])
+                for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+
+                    mean, var = gp.predict_noiseless(X)
+                    mean = mean.squeeze()
+                    std_dev = np.sqrt(var.squeeze())
+                    lower_bound = mean - beta*std_dev
+                    slack=np.atleast_1d(lower_bound - self.fmin[i])
+                    slack /=scaling
+                    values=np.maximum(values,std_dev/scaling)
+                    interest_function *= norm.pdf(slack, scale=0.2)
 
 
 
+                def sort_generator(array):
+                    """Return the sorted array, largest element first."""
+                    return array.argsort()[::-1]
+                # Sort the objective by interest_function*values
+                idx_sorted = sort_generator(interest_function*values)
+                # Pick the boundary points as the ones with the highest values
+                idx_boundary = idx_sorted[:set_size]
+                # Sample interior points at random from the remaining ones
+                idx_interior = idx_sorted[set_size:]
+                idx_interior=np.random.choice(idx_interior,size=interior_size)
+                idx_full = np.vstack((idx_boundary.reshape(-1,1), idx_interior.reshape(-1,1)))
 
-            idx_full=np.vstack((idx_boundary,idx_interior))
-            X_full=X[idx_full,:]
-            X_full=X_full.squeeze()
-            X_full = np.vstack((self._x[self.x_0_idx_gp_full_data,:],X_full))
+                # Define full data matrix for the GP
+                X_full = X[idx_full, :]
+                X_full = X_full.squeeze()
+                X_full = np.vstack((self._x[self.x_0_idx_gp_full_data, :], X_full))
 
-            Y_full=Y[idx_full,:]
-            Y_full = Y_full.squeeze()
-            Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :],Y_full))
+                Y_full = Y[idx_full, :]
+                Y_full = Y_full.squeeze()
+                Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :], Y_full))
 
-
+            # Update gp idx
             self.x_0_idx_gp = np.arange(start=0, stop=self._x[self.x_0_idx_gp_full_data, :].shape[0], step=1)
 
+            # set GP points
             for i, gp in enumerate(self.gps):
                 gp.set_XY(X_full,Y_full[:,i].reshape(-1,1))
 
@@ -3249,19 +3342,32 @@ class GoSafeSwarm(SafeOptSwarm):
 
 
     def get_boundary_particles(self,total_size):
-
+        """""
+           Uses swarm optimization to obtain points from G_n.
+           total_size: int
+                total number of particles
+        """""
+        # Find all sets in the safe set
         sets=np.unique(self.set_number)
+        # Partition total size equally among all sets
         total_sets=len(sets)
         size_per_set=int(total_size/total_sets)
+        # Define swarm
         best_particles=np.zeros([total_sets*size_per_set,self._x.shape[1]])
         swarm = SwarmOptimization(size_per_set,self.optimal_velocities,
                                                         partial(self._compute_particle_fitness,
                                                                 'expanders_S2'),
                                                         bounds=self.bounds)
         for i,number in enumerate(sets):
+            # Perform swarm optimization and pick best particles
             indexes=np.where(self.set_number == number)[0]
             random_id = np.random.choice(indexes, size=size_per_set)
             particles = self.S[random_id, :]
+
+            if np.all(np.sum(particles[:, self.state_idx] == self.x_0, axis=1) == self.state_dim):
+                u = np.random.uniform(-1, 1, size=[self.swarm_size, 1])
+                particles[:, self.state_idx] = particles[:, self.state_idx] + u * self.optimal_velocities[1]
+
             swarm.init_swarm(particles)
             swarm.run_swarm(self.max_iters)
             best_particles[i*size_per_set:(i+1)*size_per_set,:]=swarm.best_positions
