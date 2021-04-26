@@ -2525,8 +2525,8 @@ class GoSafeSwarm(SafeOptSwarm):
             return lower_bound, global_safe
         # Set particle values for particles with uncertainty less than epsilon to 0.
         # Avoids sampling particles which we are certain of
-        #ind = values < self.eps
-        #values[ind]=0
+        ind = values < self.eps
+        values[ind]=0
         # add penalty
         values += total_penalty
 
@@ -3299,6 +3299,8 @@ class GoSafeSwarm(SafeOptSwarm):
                 values=np.zeros(X.shape[0])
                 for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
 
+                    if self.fmin[i] == -np.inf:
+                        continue
                     mean, var = gp.predict_noiseless(X)
                     mean = mean.squeeze()
                     std_dev = np.sqrt(var.squeeze())
@@ -3306,15 +3308,20 @@ class GoSafeSwarm(SafeOptSwarm):
                     slack=np.atleast_1d(lower_bound - self.fmin[i])
                     slack /=scaling
                     values=np.maximum(values,std_dev/scaling)
+                    slack=slack/np.max(np.abs(slack))
                     interest_function *= norm.pdf(slack, scale=0.2)
 
+                    #interest_function*=1/(1+np.exp(5*np.square(slack)))
 
 
                 def sort_generator(array):
                     """Return the sorted array, largest element first."""
                     return array.argsort()[::-1]
                 # Sort the objective by interest_function*values
-                idx_sorted = sort_generator(interest_function*values)
+                values=(values-np.min(values))/(np.max(values)-np.min(values))
+                score=interest_function*values
+
+                idx_sorted = sort_generator(score)
                 # Pick the boundary points as the ones with the highest values
                 idx_boundary = idx_sorted[:set_size]
                 # Sample interior points at random from the remaining ones
