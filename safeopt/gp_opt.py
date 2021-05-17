@@ -27,6 +27,10 @@ import logging
 __all__ = ['SafeOpt', 'SafeOptSwarm',"GoSafe","GoSafeSwarm"]
 
 
+
+def unique(array):
+    uniq, index = np.unique(array, return_index=True,axis=1)
+    return uniq[:,index.argsort()]
 class GaussianProcessOptimization(object):
     """
     Base class for GP optimization.
@@ -2249,15 +2253,15 @@ class GoSafeSwarm(SafeOptSwarm):
         # Save state information
         self.state_dim=np.shape(x_0)[0]
         self.state_idx = list(range(self.gp.input_dim - self.state_dim, self.gp.input_dim))
-        self.x_0 = x_0
 
+        self.x_0=x_0.T
         # Update velocity for S1 (should only affect the actions)
         self.S1_velocities=self.optimal_velocities.copy()
         self.S1_velocities=self.S1_velocities[:-self.state_dim] #For S1, only look at parameters for the actions
 
-
+        self.action_dim=self.gp.input_dim - self.state_dim
         ## Define the swarms
-
+        bounds=np.asarray(self.bounds)
         # For S1, we need maximizers, expanders and greedy (used by maximizers)
         # As we only look at parameters in the action space, no velocity in
         # direction of the state is considered
@@ -2268,7 +2272,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 self.S1_velocities,
                 partial(self._compute_particle_fitness,
                         swarm_type),
-                bounds=[self.bounds[0]])
+                bounds=bounds[:self.action_dim].tolist())
             for swarm_type in S1_swarm_types}
 
         # For S2 we only consider expansions but can have velocities in all
@@ -2277,7 +2281,7 @@ class GoSafeSwarm(SafeOptSwarm):
                                                      self.optimal_velocities,
                                                      partial(self._compute_particle_fitness,
                                                              'expanders_S2'),
-                                                     bounds=self.bounds)
+                                                     bounds=bounds)
 
         # S3 only updates actions, need to ensure that starting state is safe. Furthermore, actions can be arbitary large (update velocity set)
         S3_velocities=self.optimal_velocities.copy()
@@ -2287,15 +2291,17 @@ class GoSafeSwarm(SafeOptSwarm):
                                                      S3_velocities, #We can allow faster velocities for S3
                                                      partial(self._compute_particle_fitness,
                                                              'S3'),
-                                                     bounds=[self.bounds[0]])
+                                                     bounds=bounds[:self.action_dim].tolist())
 
         # Criterion indicating which of the 3 methods S1,S2,S3 we are running atm
         self.criterion='init'
         self.perturb_particles=True
         # Get where in the safe set x_0 is stored
-        unique_safe_states=np.unique(self.S[:,self.state_idx])
-        closest_state_idx = np.argmin(np.linalg.norm(unique_safe_states - self.x_0, axis=1))
-        closest_state=unique_safe_states[closest_state_idx]
+        unique_safe_states=unique(self.S[:,self.state_idx])
+
+
+        closest_state_idx = np.argmin(np.linalg.norm(unique_safe_states- self.x_0, axis=1))
+        closest_state=unique_safe_states[closest_state_idx,:]
         # All combinations of x_0 in the safe set
         self.x_0_idx=np.where(np.sum(self.S[:,self.state_idx]==closest_state,axis=1)==self.state_dim)[0]
         # All combinations of x_0 in the GP
@@ -2346,6 +2352,7 @@ class GoSafeSwarm(SafeOptSwarm):
 
         self.lower_bound=np.ones([self.S.shape[0],len(self.gps)])*-np.inf
 
+        #self.expanders_updated=True
 
     def compute_particle_distance(self,particles,X_data,full=False):
 
@@ -2422,7 +2429,7 @@ class GoSafeSwarm(SafeOptSwarm):
             particles=np.hstack((particles,np.tile(self.x_0,(particles.shape[0],1))))
         # Add state to the particle for S3
         if swarm_type == 'S3':
-            particles=np.hstack((particles,self.S3_states.reshape(-1,1)))
+            particles=np.hstack((particles,self.S3_states.reshape(-1,self.state_dim)))
 
         # classify the particle's function values
         mean, var = self.gps[0].predict_noiseless(particles)
@@ -2464,6 +2471,9 @@ class GoSafeSwarm(SafeOptSwarm):
                 # the lower bounds
                 interest_function = (len(self.gps) *
                                      np.ones(np.shape(values), dtype=np.float))
+
+                #if self.expanders_updated:
+                slack_min = np.ones(len(particles)) * np.inf
 
             elif is_S3:
                 interest_function = (len(self.gps) *
@@ -2513,6 +2523,7 @@ class GoSafeSwarm(SafeOptSwarm):
         global_safe = np.ones(particles.shape[0], dtype=np.bool)
         total_penalty = np.zeros(particles.shape[0], dtype=np.float)
 
+
         for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
 
             # Only recompute confidence intervals for constraints
@@ -2550,7 +2561,15 @@ class GoSafeSwarm(SafeOptSwarm):
 
             if is_expander or is_expander_S2:
                 # check if the particles are expanders for the current gp
-                interest_function *= norm.pdf(slack, scale=0.2)
+                #if self.expanders_updated:
+                slack_min=np.minimum(slack_min,slack)
+                #else:
+                #interest_function *= norm.pdf(slack, scale=0.2)
+
+        #if self.expanders_updated:
+        if is_expander or is_expander_S2:
+                # check if the particles are expanders for the current gp
+            interest_function *= norm.pdf(slack_min, scale=0.2)
 
 
         # this swarm type is only interested in knowing whether the particles
@@ -2683,11 +2702,13 @@ class GoSafeSwarm(SafeOptSwarm):
                 # Sample remaining points
                 idx_remaining=[x for x in list(range(safe_size)) if x not in self.x_0_idx]
                 self.S3_states = np.zeros([self.swarm_size, self.state_dim])
+
                 if len(idx_remaining)>0:
-                    random_id = np.random.choice(idx_remaining, size=self.swarm_size-size)
                     # Store all the sampled states
                     self.S3_states[:size,:]=self.x_0
-                    self.S3_states[size:self.swarm_size,:] = self.S[random_id, self.state_idx].reshape(-1,self.state_dim)
+                    if self.swarm_size - size > 0:
+                        random_id = np.random.choice(idx_remaining, size=self.swarm_size - size)
+                        self.S3_states[size:self.swarm_size,:] = self.S[random_id, self.state_idx].reshape(-1,self.state_dim)
 
                 else:
                     self.S3_states[:,:]=self.x_0
@@ -2696,9 +2717,9 @@ class GoSafeSwarm(SafeOptSwarm):
                 #action_idx=list(range(0,self.state_dim))
                 # Take any random action
                 bound=np.array(self.bounds)
-                action=np.random.uniform(low=bound[:-self.state_dim,0],high=bound[:-self.state_dim,1],
-                                         size=self.swarm_size)
-                particles=action.reshape(-1,1)
+                action=np.random.uniform(low=bound[:self.action_dim,0],high=bound[:self.action_dim,1],
+                                         size=[self.swarm_size,self.action_dim])
+                particles=action.reshape(-1,self.action_dim)
                 current_set=self.current_set_number
 
 
@@ -2785,7 +2806,7 @@ class GoSafeSwarm(SafeOptSwarm):
                     # Safe indicator of which set the point belongs to
                     self.set_number=np.vstack((self.set_number,current_set))
                     # Update index for x_0 if added point corresponds to x_0 IC
-                    if best_positions[[j],self.state_idx]==self.x_0:
+                    if np.sum(best_positions[[j],self.state_idx]==self.x_0)==self.state_dim:
                         # added point corresponds to initial condition x_0
                         self.x_0_idx=np.append(self.x_0_idx,[len(self.S)-1])
 
@@ -2886,9 +2907,9 @@ class GoSafeSwarm(SafeOptSwarm):
                              self.best_lower_bound)
 
                 if std_maxi >= std_exp:
-                    return np.hstack((x_maxi.reshape(-1,1),self.x_0))#np.asarray([x_maxi[0],self.x_0[0]])
+                    return np.hstack((x_maxi.reshape(1,-1),self.x_0)).squeeze()#np.asarray([x_maxi[0],self.x_0[0]])
                 else:
-                    return np.hstack((x_exp.reshape(-1,1),self.x_0))
+                    return np.hstack((x_exp.reshape(1,-1),self.x_0)).squeeze()
 
 
         # Check if we have exceeded maximum number of S2 steps, if yes go to S3
@@ -2907,7 +2928,7 @@ class GoSafeSwarm(SafeOptSwarm):
             # If uncertainty is less than eps, go to S3
             if std_exp>= self.eps:
                 logging.info("The best expander (S2) has std. dev. %f" % std_exp)
-                return x_exp
+                return x_exp.squeeze()
 
 
 
@@ -2935,7 +2956,7 @@ class GoSafeSwarm(SafeOptSwarm):
         std_exp /= self.scaling
         std_exp = np.max(std_exp)
         logging.info("The best S3 point has std. dev. %f" % std_exp)
-        return x_exp
+        return x_exp.squeeze()
 
 
     def get_maximum(self):
@@ -2970,6 +2991,8 @@ class GoSafeSwarm(SafeOptSwarm):
         # If data point is added by S3, add it to the safe set
         if self.criterion=="S3":
             # Add data point to the safe set
+            # Maintain sparsity of safe set by only adding 1 point during S3
+            self.criterion=="init"
             self.S = np.vstack((self.S, x))
             self.lower_bound=np.vstack((self.lower_bound,np.ones([1,len(self.gps)])*-np.inf))
             # Update step counters to run S1,S2 again
@@ -2978,7 +3001,7 @@ class GoSafeSwarm(SafeOptSwarm):
             self.s2_steps=0
             self.set_number = np.vstack((self.set_number, self.current_set_number))
             # If state for data point is x_0 -> x_0_idx counter
-            if sum(x[0][self.state_idx] == self.x_0)==self.state_dim:
+            if sum(x[0][self.state_idx] == self.x_0.squeeze())==self.state_dim:
                 # added point corresponds to initial condition x_0
                 self.x_0_idx = np.append(self.x_0_idx, [len(self.S) - 1])
 
@@ -3007,7 +3030,7 @@ class GoSafeSwarm(SafeOptSwarm):
         #    self.x_0_idx_gp = np.append(self.x_0_idx_gp, [self.gps[0].X.shape[0] - 1])
 
         # Check and update x_0_idx_gp counter
-        if sum(x[0][self.state_idx]==self.x_0)==self.state_dim:
+        if sum(x[0][self.state_idx]==self.x_0.squeeze())==self.state_dim:
 
             self.x_0_idx_gp = np.append(self.x_0_idx_gp, [self.gps[0].X.shape[0] - 1])
             self.x_0_idx_gp_full_data=np.append(self.x_0_idx_gp_full_data,[self._x.shape[0]-1])
@@ -3131,7 +3154,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 # Store state in the failed state list
                 self.Failed_state_list.append(state)
                 # Check if the current state and the closest safe state are close enough, if not mark experiment as failed
-                covariance=gp.kern.K(closest_states,alternative_options)/scaling
+                covariance=gp.kern.K(closest_states,alternative_options)/scaling**2
 
                 if np.all(covariance < self.safety_cutoff):  # cutoff for checking if the state can give any information about our current one
                     Fail=True
@@ -3269,6 +3292,7 @@ class GoSafeSwarm(SafeOptSwarm):
 
                 #covariance=self.gp.kern.K(expander_points,X)
                 #covariance /= self.scaling[0] ** 2
+                np.random.shuffle(expander_points)
                 covariance=self.compute_particle_distance(expander_points,X,full=True)
                 # Find unique points with the highest covariance -> Boundary points
                 idx_boundary=np.argmax(covariance,axis=1)
@@ -3285,7 +3309,6 @@ class GoSafeSwarm(SafeOptSwarm):
                 # Get covariance ranking matrix
                 covariance_rankings=np.argsort(np.argsort(covariance))
                 n_points=X.shape[0]
-
                 # Loop over all candidate to select subset
                 for i in range(1,n_points):
                     # If enough data points for the boundary and interior have been selected, exit the loop
@@ -3339,6 +3362,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 interest_function = (len(self.gps) *
                                      np.ones(X.shape[0], dtype=np.float))
                 values=np.zeros(X.shape[0])
+                slack_min=np.ones(X.shape[0])*np.inf
                 for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
 
                     if self.fmin[i] == -np.inf:
@@ -3350,24 +3374,32 @@ class GoSafeSwarm(SafeOptSwarm):
                     slack=np.atleast_1d(lower_bound - self.fmin[i])
                     slack /=scaling
                     values=np.maximum(values,std_dev/scaling)
-                    slack=slack/np.max(np.abs(slack))
-                    interest_function *= norm.pdf(slack, scale=0.2)
+                    #slack=slack/np.max(np.abs(slack))
+                    slack_min=np.minimum(slack,slack_min)
+                    #interest_function *= norm.pdf(slack, scale=0.2)
 
                     #interest_function*=1/(1+np.exp(5*np.square(slack)))
-
+                interest_function*=norm.pdf(slack_min,scale=0.2)
 
                 def sort_generator(array):
                     """Return the sorted array, largest element first."""
                     return array.argsort()[::-1]
                 # Sort the objective by interest_function*values
-                values=(values-np.min(values))/(np.max(values)-np.min(values))
+                #values=(values-np.min(values))/(np.max(values)-np.min(values))
                 score=interest_function*values
 
                 idx_sorted = sort_generator(score)
                 # Pick the boundary points as the ones with the highest values
+                expander_size=int(set_size*0.75)
                 idx_boundary = idx_sorted[:set_size]
+                idx_sorted2=sort_generator(interest_function) #Points with low lowerbounds only
+                idx_boundary2=idx_sorted2[:set_size-expander_size]
+
+                idx_boundary=np.vstack((idx_boundary.reshape(-1,1),idx_boundary2.reshape(-1,1)))
                 # Sample interior points at random from the remaining ones
-                idx_interior = idx_sorted[set_size:]
+
+                idx_interior = [x for x in list(range(X.shape[0])) if x not in idx_boundary]
+                #idx_interior = idx_sorted[set_size:]
                 idx_interior=np.random.choice(idx_interior,size=interior_size)
                 idx_full = np.vstack((idx_boundary.reshape(-1,1), idx_interior.reshape(-1,1)))
 
@@ -3396,6 +3428,7 @@ class GoSafeSwarm(SafeOptSwarm):
            total_size: int
                 total number of particles
         """""
+
         # Find all sets in the safe set
         sets=np.unique(self.set_number)
         # Partition total size equally among all sets
@@ -3409,11 +3442,12 @@ class GoSafeSwarm(SafeOptSwarm):
                                                                 'expanders_S2'),
                                                         bounds=self.bounds)
 
-
         swarm_boundary_states=SwarmOptimization(size_per_set-size_expander,self.optimal_velocities,
                                                         self._boundary_fitness_function,
                                                         bounds=self.bounds)
-
+        # Avoid driving points together by encouraging velocities towards global optimum
+        swarm.c2 = 0
+        swarm_boundary_states.c2=0
 
         for i,number in enumerate(sets):
             # Perform swarm optimization and pick best particles
@@ -3446,7 +3480,7 @@ class GoSafeSwarm(SafeOptSwarm):
                              np.ones(particles.shape[0], dtype=np.float))
 
         total_penalty=np.zeros(particles.shape[0],dtype=np.float)
-
+        slack_min=np.ones(len(particles))*np.inf
         global_safe = np.ones(particles.shape[0], dtype=np.bool)
         for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
 
@@ -3461,8 +3495,13 @@ class GoSafeSwarm(SafeOptSwarm):
             global_safe &= slack >= 0
             slack /= scaling
             total_penalty += self._compute_penalty(slack)
-            interest_function *= norm.pdf(slack, scale=0.2)
+            #if self.expanders_updated:
+            slack_min=np.minimum(slack_min,slack)
+            #else:
+            #interest_function *= norm.pdf(slack, scale=0.2)
 
+        #if self.expanders_updated:
+        interest_function *= norm.pdf(slack_min, scale=0.2)
         values=interest_function*(1+total_penalty)
 
         return values,global_safe
