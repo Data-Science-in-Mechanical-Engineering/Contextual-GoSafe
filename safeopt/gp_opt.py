@@ -29,8 +29,8 @@ __all__ = ['SafeOpt', 'SafeOptSwarm',"GoSafe","GoSafeSwarm"]
 
 
 def unique(array):
-    uniq, index = np.unique(array, return_index=True,axis=1)
-    return uniq[:,index.argsort()]
+    uniq, index = np.unique(array, return_index=True,axis=0)
+    return uniq[index.argsort(),:]
 class GaussianProcessOptimization(object):
     """
     Base class for GP optimization.
@@ -872,8 +872,13 @@ class SafeOptSwarm(GaussianProcessOptimization):
                 # Store optimal velocity
                 velocities[i, j] = mid
 
-        # Select the minimal velocity (for the toughest safety constraint)
-        velocities = np.min(velocities, axis=0)
+
+        if self.fmin[0]==-np.inf:
+            # Select the minimal velocity (for the toughest safety constraint)
+            velocities = np.min(velocities[1:,:], axis=0)
+        else:
+            velocities = np.min(velocities, axis=0)
+
 
         # Scale for number of parameters (this might not be so clever if they
         # are all independent, additive kernels).
@@ -2237,7 +2242,7 @@ class GoSafeSwarm(SafeOptSwarm):
     """
 
     def __init__(self, gp, fmin, bounds,x_0,beta=2, scaling='auto', threshold=0,
-                 swarm_size=20,max_S1_steps=30,max_S2_steps=50,max_S3_steps=30,tol=0.3,eta=0.7,eps=0.1,S3_x0_ratio=0.7,max_data_size=400,reset_size=200,boundary_ratio=0.7):
+                 swarm_size=20,max_S1_steps=30,max_S2_steps=10,max_S3_steps=30,max_expansion_steps=50,tol=0.3,eta=0.7,eps=0.1,S3_x0_ratio=0.7,max_data_size=400,reset_size=200,boundary_ratio=0.7):
 
         #Initialize all SafeOptSwarm params
         super(GoSafeSwarm, self).__init__(gp=gp,
@@ -2351,6 +2356,9 @@ class GoSafeSwarm(SafeOptSwarm):
         self.boundary_ratio=boundary_ratio
 
         self.lower_bound=np.ones([self.S.shape[0],len(self.gps)])*-np.inf
+        
+        self.max_expansion_steps=max_expansion_steps
+        self.expansion_steps=0
 
         #self.expanders_updated=True
 
@@ -2879,56 +2887,61 @@ class GoSafeSwarm(SafeOptSwarm):
         if self.gps[0].X.shape[0]-self.gps[0].X[self.x_0_idx_gp,:].shape[0]>=self.data_size_max:
             self.select_gp_subset()
         # Check if we have exceeded maximum number of steps for S1, if yes go to S2
-        if self.s1_steps<self.max_S1_steps:
-            self.criterion="S1"
-            self.s1_steps+=1
-            # Run both swarms:
-            x_maxi, std_maxi = self.get_new_query_point('maximizers')
-            if ucb:
-                logging.info('Using ucb criterion.')
-                return x_maxi
-
-            x_exp, std_exp = self.get_new_query_point('expanders')
-
-            # Remove expanders below threshold or without safety constraint.
-            std_exp[(std_exp < self.threshold) | (self.fmin == -np.inf)] = 0
-
-            # Apply scaling
-            std_exp /= self.scaling
-            std_exp = np.max(std_exp)
-
-            std_maxi = std_maxi[0] / self.scaling[0]
-            std_maxi = np.max(std_maxi)
-            # Check if we have greater than eps uncertainty, if not go to S2
-            if max(std_exp,std_maxi)>self.eps:
-                logging.info("The best maximizer has std. dev. %f" % std_maxi)
-                logging.info("The best expander has std. dev. %f" % std_exp)
-                logging.info("The greedy estimate of lower bound has value %f" %
-                             self.best_lower_bound)
-
-                if std_maxi >= std_exp:
-                    return np.hstack((x_maxi.reshape(1,-1),self.x_0)).squeeze()#np.asarray([x_maxi[0],self.x_0[0]])
-                else:
-                    return np.hstack((x_exp.reshape(1,-1),self.x_0)).squeeze()
+        if self.expansion_steps< self.max_expansion_steps:
 
 
-        # Check if we have exceeded maximum number of S2 steps, if yes go to S3
-        if self.s2_steps < self.max_S2_steps:
+            if self.s1_steps<self.max_S1_steps:
+                self.criterion="S1"
+                self.s1_steps+=1
+                # Run both swarms:
+                x_maxi, std_maxi = self.get_new_query_point('maximizers')
+                if ucb:
+                    logging.info('Using ucb criterion.')
+                    return x_maxi
 
-            #if self.s2_steps%10==0:
-            #    if self.s2_steps%20==0:
-            #        self.Reset_gp_data()
-            #    self.Select_Gp_subset()
-            self.s2_steps+=1
-            self.s1_steps = 0
-            self.criterion = "S2"
-            x_exp, std_exp = self.get_new_query_point('expanders_S2')
-            std_exp /= self.scaling
-            std_exp = np.max(std_exp)
-            # If uncertainty is less than eps, go to S3
-            if std_exp>= self.eps:
-                logging.info("The best expander (S2) has std. dev. %f" % std_exp)
-                return x_exp.squeeze()
+                x_exp, std_exp = self.get_new_query_point('expanders')
+
+                # Remove expanders below threshold or without safety constraint.
+                std_exp[(std_exp < self.threshold) | (self.fmin == -np.inf)] = 0
+
+                # Apply scaling
+                std_exp /= self.scaling
+                std_exp = np.max(std_exp)
+
+                std_maxi = std_maxi[0] / self.scaling[0]
+                std_maxi = np.max(std_maxi)
+                # Check if we have greater than eps uncertainty, if not go to S2
+                if max(std_exp,std_maxi)>self.eps:
+                    self.expansion_steps+=1
+                    logging.info("The best maximizer has std. dev. %f" % std_maxi)
+                    logging.info("The best expander has std. dev. %f" % std_exp)
+                    logging.info("The greedy estimate of lower bound has value %f" %
+                                 self.best_lower_bound)
+
+                    if std_maxi >= std_exp:
+                        return np.hstack((x_maxi.reshape(1,-1),self.x_0)).squeeze()#np.asarray([x_maxi[0],self.x_0[0]])
+                    else:
+                        return np.hstack((x_exp.reshape(1,-1),self.x_0)).squeeze()
+
+
+            # Check if we have exceeded maximum number of S2 steps, if yes go to S3
+            if self.s2_steps < self.max_S2_steps:
+
+                #if self.s2_steps%10==0:
+                #    if self.s2_steps%20==0:
+                #        self.Reset_gp_data()
+                #    self.Select_Gp_subset()
+                self.s2_steps+=1
+                #self.s1_steps = 0
+                self.criterion = "S2"
+                x_exp, std_exp = self.get_new_query_point('expanders_S2')
+                std_exp /= self.scaling
+                std_exp = np.max(std_exp)
+                # If uncertainty is less than eps, go to S3
+                if std_exp>= self.eps:
+                    self.expansion_steps += 1
+                    logging.info("The best expander (S2) has std. dev. %f" % std_exp)
+                    return x_exp.squeeze()
 
 
 
@@ -2942,6 +2955,7 @@ class GoSafeSwarm(SafeOptSwarm):
         if self.s3_steps==0:
             self.current_set_number+=1
         self.s3_steps += 1
+
         # Check if we have exceeded maximum number of S3 steps, if yes reset all step counters, if no sample from S3 swarm
         self.switch= self.s3_steps>=self.max_S3_steps
         if self.switch:
@@ -2990,6 +3004,7 @@ class GoSafeSwarm(SafeOptSwarm):
         """
         # If data point is added by S3, add it to the safe set
         if self.criterion=="S3":
+            self.expansion_steps = 0
             # Add data point to the safe set
             # Maintain sparsity of safe set by only adding 1 point during S3
             self.criterion=="init"
@@ -3034,6 +3049,10 @@ class GoSafeSwarm(SafeOptSwarm):
 
             self.x_0_idx_gp = np.append(self.x_0_idx_gp, [self.gps[0].X.shape[0] - 1])
             self.x_0_idx_gp_full_data=np.append(self.x_0_idx_gp_full_data,[self._x.shape[0]-1])
+
+
+
+
 
 
     def check_rollout(self,state,action):
@@ -3117,10 +3136,21 @@ class GoSafeSwarm(SafeOptSwarm):
             # unique_safe_states = np.unique(self.S[:, self.state_idx])
             # Find the closest state in the full data
             full_data=np.vstack((self._x,self.S))
-            diff = np.linalg.norm(full_data[:, self.state_idx]- state, axis=1)
-            closest_states_idx = np.where(diff == diff.min())[0]
-            closest_states = full_data[closest_states_idx, :]
-            closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+
+            diff=np.abs(full_data[:,self.state_idx]-state)
+            diff=diff<=self.optimal_velocities[self.state_idx]
+            idx=np.sum(diff,axis=1)==self.state_dim
+            if np.sum(idx)==0:
+                diff = np.linalg.norm(full_data[:, self.state_idx]- state, axis=1)
+                closest_states_idx = np.where(diff == diff.min())[0]
+                closest_states = full_data[closest_states_idx, :]
+                closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+                #at_boundary = True
+                #Fail = True
+                return at_boundary, Fail, action
+            else:
+                closest_states = full_data[idx, :]
+                closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
 
             # Check if applying other actions guarantee safety --> Pick safe actions from the closest state
             alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(full_data)[1]])
@@ -3154,13 +3184,18 @@ class GoSafeSwarm(SafeOptSwarm):
                 # Store state in the failed state list
                 self.Failed_state_list.append(state)
                 # Check if the current state and the closest safe state are close enough, if not mark experiment as failed
-                covariance=gp.kern.K(closest_states,alternative_options)/scaling**2
+                if np.sum(idx) == 0:
+                    covariance=gp.kern.K(closest_states,alternative_options)/scaling**2
 
-                if np.all(covariance < self.safety_cutoff):  # cutoff for checking if the state can give any information about our current one
-                    Fail=True
+                    if np.all(covariance < self.safety_cutoff):  # cutoff for checking if the state can give any information about our current one
+                        Fail=True
+
+                    else:
+                        # Pick any random safe action for this state
+                        random_id = np.random.randint(np.shape(alternative_options)[0], size=1)
+                        action = alternative_options[random_id, :-self.state_dim]
 
                 else:
-
                     # Pick any random safe action for this state
                     random_id=np.random.randint(np.shape(alternative_options)[0],size=1)
                     action=alternative_options[random_id,:-self.state_dim]
@@ -3449,10 +3484,17 @@ class GoSafeSwarm(SafeOptSwarm):
         swarm.c2 = 0
         swarm_boundary_states.c2=0
 
+
+        lower_bound=self.lower_bound-self.fmin
+        slack_min=np.min(lower_bound,axis=1)
+        slack_min= np.atleast_1d(slack_min)
+        p=np.exp(-5*slack_min**2)
         for i,number in enumerate(sets):
             # Perform swarm optimization and pick best particles
             indexes=np.where(self.set_number == number)[0]
-            random_id = np.random.choice(indexes, size=size_per_set)
+            p_points=p[indexes]
+            p_points/=np.sum(p_points)
+            random_id = np.random.choice(indexes, size=size_per_set,p=p_points)
             particles = self.S[random_id, :]
 
             if self.perturb_particles:
