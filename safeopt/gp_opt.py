@@ -2380,10 +2380,17 @@ class GoSafeSwarm(SafeOptSwarm):
         # Lowerbounds for all points in the safe set
         self.lower_bound=np.ones([self.S.shape[0],len(self.gps)])*-np.inf
 
+        self.inner_particles=np.zeros(self.S.shape[0],dtype=np.bool)
+        self.eta_interior=1
         # Indicators used to upperbound S1 and S2 steps
         self.max_expansion_steps=max_expansion_steps
         self.expansion_steps=0
 
+        self.use_convexhull=False
+
+    def _seed(self,seed=None):
+        if seed is not None:
+            np.random.seed(seed)
 
     def compute_particle_distance(self,particles,X_data,full=False):
         """
@@ -2546,6 +2553,11 @@ class GoSafeSwarm(SafeOptSwarm):
 
                 slack_min = np.ones(len(particles)) * np.inf
 
+                #if is_expander_S2:
+                #    interior_particles=self.S[self.inner_particles,:]
+                #    covariance=self.compute_particle_distance(particles,interior_particles)
+                #    interest_function *= np.exp(-5 * covariance)
+
             elif is_S3:
                 interest_function = (len(self.gps) *
                                      np.ones(np.shape(values), dtype=np.float))
@@ -2610,7 +2622,7 @@ class GoSafeSwarm(SafeOptSwarm):
                     # Update lower bounds for points on the safe set as defined in the paper
                     # Using the definition of the contained set
                     self.lower_bound[:, i] = np.maximum(self.lower_bound[:, i], lower_bound)
-                    lower_bound=self.lower_bound[:, i]
+                    lower_bound=self.lower_bound[:, i].copy()
                 #upper_bound=mean+ beta * std_dev
                 values = np.maximum(values, std_dev / scaling)
 
@@ -2625,7 +2637,7 @@ class GoSafeSwarm(SafeOptSwarm):
             # computing penalties
             global_safe &= slack >= 0
 
-            # Skip cost update for safety evaluation or for S3
+            # Skip cost update for safety evaluation
             if is_safe:
                 continue
 
@@ -2646,6 +2658,7 @@ class GoSafeSwarm(SafeOptSwarm):
         # this swarm type is only interested in knowing whether the particles
         # are safe.
         if is_safe:
+            self.inner_particles=np.min(self.lower_bound-self.fmin,axis=1)>=self.eta_interior
             return lower_bound, global_safe
         # Set particle values for particles with uncertainty less than epsilon to 0.
         # Avoids sampling particles which we are certain of
@@ -2716,6 +2729,7 @@ class GoSafeSwarm(SafeOptSwarm):
             # Remove unsafe points
             self.S = self.S[safe]
             self.lower_bound=self.lower_bound[safe]
+            self.inner_particles=self.inner_particles[safe]
             self.set_number=self.set_number[safe]
             self.x_0_idx=np.where(np.sum(self.S[:,self.state_idx]==self.x_0,axis=1)==self.state_dim)[0]
             safe_x0 = self.S[self.x_0_idx,:]
@@ -2886,6 +2900,7 @@ class GoSafeSwarm(SafeOptSwarm):
                 if np.all(covariance[j, mask] <= 0.95):
                     self.S = np.vstack((self.S, best_positions[[j], :]))
                     self.lower_bound=np.vstack((self.lower_bound,np.ones([1,len(self.gps)])*-np.inf))
+                    self.inner_particles=np.hstack((self.inner_particles,0))
                     # Safe indicator of which set the point belongs to
                     self.set_number=np.vstack((self.set_number,current_set))
                     # Update index for x_0 if added point corresponds to x_0 IC
@@ -2963,8 +2978,8 @@ class GoSafeSwarm(SafeOptSwarm):
         if self.gps[0].X.shape[0]-self.gps[0].X[self.x_0_idx_gp,:].shape[0]>=self.data_size_max:
             self.select_gp_subset()
 
-        #if self.expansion_steps % 3 ==0:
-        #    x_exp, std_exp = self.get_new_query_point('expanders_S2')
+        if self.expansion_steps % 15 ==0:
+            x_exp, std_exp = self.get_new_query_point('expanders_S2')
 
         # Check if we have exceeded maximum number of steps for S1, if yes go to S2
         if self.expansion_steps< self.max_expansion_steps:
@@ -3788,29 +3803,30 @@ class GoSafeSwarm(SafeOptSwarm):
             best_expander=swarm_expanders.best_positions[idx_sorted]
 
 
-            # Define the convex hull and read out the vertices
-            hull=ConvexHull(best_expander)
-            expanders=best_expander[hull.vertices,:]
+            if self.use_convexhull:
+                # Define the convex hull and read out the vertices
+                hull=ConvexHull(best_expander)
+                expanders=best_expander[hull.vertices,:]
 
 
-            # Find potential points which we could add (cov <0,95)
-            cov=self.compute_particle_distance(best_expander,expanders)
-            idx=np.where(cov<0.95)[0]
-            
-            # If we want to have a fast approach, add all the potential points. This is fast but points are not
-            # as wide spread. Else add point 1 by 1
-            if Fast:
-                best_expander = np.vstack((expanders, best_expander[idx, :]))
-            else:
-                # Loop over all potential points and if the covariance is < 0.95, add it to the selected points
-                selected_points=expanders
-                for index in idx:
-                    cov=self.compute_particle_distance(best_expander[index,:].reshape(1,-1),selected_points)
+                # Find potential points which we could add (cov <0,95)
+                cov=self.compute_particle_distance(best_expander,expanders)
+                idx=np.where(cov<0.95)[0]
 
-                    if cov<0.95:
-                        selected_points = np.vstack((selected_points, best_expander[index, :]))
-                     
-                best_expander=selected_points
+                # If we want to have a fast approach, add all the potential points. This is fast but points are not
+                # as wide spread. Else add point 1 by 1
+                if Fast:
+                    best_expander = np.vstack((expanders, best_expander[idx, :]))
+                else:
+                    # Loop over all potential points and if the covariance is < 0.95, add it to the selected points
+                    selected_points=expanders
+                    for index in idx:
+                        cov=self.compute_particle_distance(best_expander[index,:].reshape(1,-1),selected_points)
+
+                        if cov<0.95:
+                            selected_points = np.vstack((selected_points, best_expander[index, :]))
+
+                    best_expander=selected_points
                 
             # Follow the same procedure for the boundary particles
             swarm_boundary_states.init_swarm(particles[size_expander:])
@@ -3819,25 +3835,26 @@ class GoSafeSwarm(SafeOptSwarm):
             idx_sorted = sort_generator(swarm_boundary_states.best_values)
             best_boundary = swarm_boundary_states.best_positions[idx_sorted]
 
-            hull = ConvexHull(best_boundary)
-            boundary= best_boundary[hull.vertices, :]
+            if self.use_convexhull:
+                hull = ConvexHull(best_boundary)
+                boundary= best_boundary[hull.vertices, :]
 
 
-            cov = self.compute_particle_distance(best_boundary, boundary)
-            idx = np.where(cov < 0.95)[0]
+                cov = self.compute_particle_distance(best_boundary, boundary)
+                idx = np.where(cov < 0.95)[0]
 
-            if Fast:
-                best_boundary = np.vstack((boundary, best_boundary[idx, :]))
-            else:
-                selected_points = boundary
-                for index in idx:
-                    cov = self.compute_particle_distance(best_boundary[index, :].reshape(1, -1), selected_points)
+                if Fast:
+                    best_boundary = np.vstack((boundary, best_boundary[idx, :]))
+                else:
+                    selected_points = boundary
+                    for index in idx:
+                        cov = self.compute_particle_distance(best_boundary[index, :].reshape(1, -1), selected_points)
 
-                    if cov < 0.95:
-                        selected_points = np.vstack((selected_points, best_boundary[index, :]))
+                        if cov < 0.95:
+                            selected_points = np.vstack((selected_points, best_boundary[index, :]))
 
-                #
-                best_boundary=selected_points
+                    #
+                    best_boundary=selected_points
 
 
 
@@ -3910,6 +3927,9 @@ class GoSafeSwarm(SafeOptSwarm):
 
         # Calculate the objective value
         interest_function *= norm.pdf(slack_min, scale=0.2)
+        #interior_particles = self.S[self.inner_particles, :]
+        #covariance = self.compute_particle_distance(particles, interior_particles)
+        #interest_function *= np.exp(-5 * covariance)
         if swarm_type=="expander":
             values=interest_function*(total_penalty+max_var)
         elif swarm_type=="boundary":
