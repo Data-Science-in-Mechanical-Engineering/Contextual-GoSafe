@@ -4982,16 +4982,16 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
             self.Failed_state_list.append(state)
             if self.return_safe_action:
                 if not self.fast_safe_action:
-                    diff=self._x[:,self.state_idx]-state
-                    diff = diff / self.L_states
-                    squared_dist = np.sum(np.square(diff), axis=1)
-
-                idx_action=np.where(squared_dist==squared_dist.min())[0]
-                if len(idx_action)>1:
-                    idx_max=np.argmax(self.lower_bound[idx_action, 0])
-                    idx_action=idx_action[idx_max]
-                #a_safe,f = self.get_maximum()
-                a_safe=self._x[idx_action,:self.action_dim]
+                    idx_action = np.where(squared_dist == squared_dist.min())[0]
+                    a_init=self._x[idx_action,:self.action_dim].copy()
+                    a_safe = self.find_constraint_max(a_init, state)
+                else:
+                    idx_action=np.where(squared_dist==squared_dist.min())[0]
+                    if len(idx_action)>1:
+                        idx_max=np.argmax(self.lower_bound[idx_action, 0])
+                        idx_action=idx_action[idx_max]
+                    #a_safe,f = self.get_maximum()
+                    a_safe=self._x[idx_action,:self.action_dim]
                 #a_safe, f = self.get_maximum()
 
         return at_boundary,a_safe
@@ -5094,6 +5094,95 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
         for i, gp in enumerate(self.gp_full):
             gp.set_XY(X_full, Y_full[:, i].reshape(-1, 1))
 
+    def find_constraint_max(self, a_init, x, iters=None):
+        """
+        Swarm optimization used for calculating the best safe action for a give state x
+
+        Parameters
+        ----------
+        a_init: ndarray
+            Actions with which we initialize our swarm
+
+        x: ndarray
+            State for which we want to find the safe action
+
+        iters: int
+            Number of iterations to run for swarm optimization
+            If None, max_iters from the class is used
+
+        Returns
+        -------
+        global_best: Best action which optimizes the swarm
+
+        """
+        iterations = iters
+        if iters is None:
+            iterations = self.max_iters
+
+        # Define the objective function for the swarm
+        constraint_objective = lambda a: self.constraint_objective(a, x=x)
+        bounds = np.asarray(self.bounds)
+        # Define the swarm
+        swarm_maximizer = SwarmOptimization(self.swarm_size, self.optimal_velocities,
+                                            constraint_objective,
+                                            bounds=bounds)
+
+        # Pick particles for swarm initialization
+        random_id = np.random.randint(a_init.shape[0], size=self.swarm_size)
+        a = a_init[random_id, :]
+        # perturb particles if desired
+        if self.perturb_particles:
+            u = np.random.uniform(-1, 1, size=a.shape)
+            a = a + u * self.optimal_velocities
+            bound = np.array(self.bounds).T
+            a = np.clip(a, bound[0], bound[1])
+
+        # Run swarm and find the global best
+        swarm_maximizer.init_swarm(a)
+        swarm_maximizer.run_swarm(iterations)
+        global_best = swarm_maximizer.global_best[None, :]
+        return global_best
+
+    def constraint_objective(self, a, x):
+
+        """
+        Objective used for the swarm optimization which finds the best action for a given state
+
+        Parameters
+        ---------
+        a: ndarray
+            action for which we evaluate the objective
+
+        x: ndaarray
+            state for which we want to find the best action
+
+        Returns
+        -------
+        lower_bound: ndarray
+            minimum of the lower_bounds for each particle over all constraint functions
+
+        global_safe: ndarray
+            Boolean array indicating if the particle is safe (true for all particles here)
+        """
+
+        # stack up the particles
+        particles = np.hstack((a, np.tile(x, (a.shape[0], 1))))
+        lower_bound = np.ones(a.shape[0]) * np.inf
+        beta = self.beta(self.t)
+        global_safe = np.ones(a.shape[0], dtype=bool)
+        # Loop over each GP to find the minimum slack
+        for i, (gp, scaling) in enumerate(zip(self.gp_full, self.scaling)):
+            if self.fmin[i] == -np.inf:
+                continue
+
+            mean, var = gp.predict_noiseless(particles)
+            mean = mean.squeeze()
+            std_dev = np.sqrt(var.squeeze())
+            lb = mean - beta * std_dev
+            slack = np.atleast_1d(lb - self.fmin[i])
+            lower_bound = np.minimum(lower_bound, slack / scaling)
+
+        return lower_bound, global_safe
 
 
 
