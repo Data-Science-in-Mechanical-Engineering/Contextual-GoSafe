@@ -4988,7 +4988,8 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
                 else:
                     idx_action=np.where(squared_dist==squared_dist.min())[0]
                     if len(idx_action)>1:
-                        idx_max=np.argmax(self.lower_bound[idx_action, 0])
+                        lb=self.lower_bound[self.interior_points,:]
+                        idx_max=np.argmax(lb[idx_action,0])
                         idx_action=idx_action[idx_max]
                     #a_safe,f = self.get_maximum()
                     a_safe=interior_states[idx_action,:self.action_dim]
