@@ -4983,7 +4983,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
             if self.return_safe_action:
                 if not self.fast_safe_action:
                     idx_action = np.where(squared_dist == squared_dist.min())[0]
-                    a_init=self._x[idx_action,:self.action_dim].copy()
+                    a_init=interior_states[idx_action,:self.action_dim].copy()
                     a_safe = self.find_constraint_max(a_init, state)
                 else:
                     idx_action=np.where(squared_dist==squared_dist.min())[0]
@@ -4991,7 +4991,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
                         idx_max=np.argmax(self.lower_bound[idx_action, 0])
                         idx_action=idx_action[idx_max]
                     #a_safe,f = self.get_maximum()
-                    a_safe=self._x[idx_action,:self.action_dim]
+                    a_safe=interior_states[idx_action,:self.action_dim]
                 #a_safe, f = self.get_maximum()
 
         return at_boundary,a_safe
