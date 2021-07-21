@@ -4263,6 +4263,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
             self.state_velocities_l = self.optimal_state_velocity(self.boundary_thresshold_l)
             self.state_squaraed_dist_l = np.sum(np.square(self.state_velocities_l / self.L_states))
         self.encourage_jumps = True
+        self.jump_frequency=20
         self.fast_safe_action = True
 
     def _get_initial_xy(self):
@@ -4732,6 +4733,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
         """
 
         self.Update_data_lower_bounds()
+        no_back_up_policy=np.sum(self.interior_points)==0
         # compute estimate of the lower bound
         self.greedy, self.best_lower_bound = self.get_new_query_point('greedy')
 
@@ -4740,7 +4742,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
 
         if self.encourage_jumps:
             # S3 has not be successful, reduce S1 steps.
-            max_S1_step=np.minimum(20,self.max_S1_steps)
+            max_S1_step=np.minimum(self.jump_frequency,self.max_S1_steps)
             if len(np.where(self.set_number == self.current_set_number)[0])>0:
                 max_S1_step=self.max_S1_steps
         # Check if we have exceeded maximum number of steps for S1, if yes go to S3
@@ -4765,7 +4767,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
             std_maxi = std_maxi / self.scaling
             std_maxi = np.max(std_maxi)
             # Check if we have greater than eps uncertainty, if not go to S2
-            if max(std_exp,std_maxi)>self.eps:
+            if max(std_exp,std_maxi)>self.eps or no_back_up_policy:
 
                 logging.info("The best maximizer has std. dev. %f" % std_maxi)
                 logging.info("The best expander has std. dev. %f" % std_exp)
