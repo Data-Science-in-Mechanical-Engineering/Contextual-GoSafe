@@ -4740,6 +4740,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
         if self.gp_full[0].X.shape[0]-self.gp_full[0].X[self.x_0_idx_gp_full,:].shape[0]>=self.data_size_max:
             self.select_gp_subset()
 
+        max_S1_step=self.max_S1_steps
         if self.encourage_jumps:
             # S3 has not be successful, reduce S1 steps.
             max_S1_step=np.minimum(self.jump_frequency,self.max_S1_steps)
@@ -4904,8 +4905,8 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
         self.lower_bound=np.vstack((self.lower_bound,np.ones([difference,len(self.gps)])*-np.inf))
         # Evaluate lower bound and update constrained set lower bounds if increasing.
         for i, gp in enumerate(self.gp_full):
-            if self.fmin[i]==-np.inf:
-                continue
+            #if self.fmin[i]==-np.inf:
+            #    continue
             mean, var = gp.predict_noiseless(self._x)
             mean = mean.squeeze()
             std_dev = np.sqrt(var.squeeze())
