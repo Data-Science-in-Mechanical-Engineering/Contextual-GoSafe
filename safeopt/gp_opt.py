@@ -2365,9 +2365,8 @@ class GoSafeSwarm(SafeOptSwarm):
         # epsilon parameter used for the convergence results
         self.eps=eps
 
-        # Indicator if we should check full safe set and gp data for boundary condition
-        self.check_full_data=True
-
+        self.fast_boundary=False
+        self.fast_data_selection=False
         # Safety cutoff used in the boundary condition to check if we can apply an action of another
         # state x_c for our state x ( k(x,x_c) \geq 0.95, else experiment has failed)
         self.safety_cutoff=0.95
@@ -2388,10 +2387,77 @@ class GoSafeSwarm(SafeOptSwarm):
 
         self.use_convexhull=False
         self.encourage_jumps=True
+        self.eta_conservative=2.5*self.eta
+        self.state_velocities=self.optimal_state_velocity(0.94)
+        self.L_states = np.asarray(self.gp.kern.lengthscale)[self.state_idx]
+        self.state_squared_dist=np.sum(np.square(self.state_velocities/self.L_states))
+        self.lower_bound_full_data = np.ones([self._x.shape[0], len(self.gps)]) * -np.inf
 
     def _seed(self,seed=None):
         if seed is not None:
             np.random.seed(seed)
+
+    def optimal_state_velocity(self,boundary_thresshold):
+        """Optimize the velocities of the particles.
+
+        Note that this only works well for stationary kernels and constant mean
+        functions. Otherwise the velocity depends on the position!
+
+        Returns
+        -------
+        velocities: ndarray
+            The estimated optimal velocities in each direction.
+        """
+
+        parameters = np.zeros((1, self.gp.input_dim), dtype=np.float)
+        velocities = np.empty((len(self.gps), self.state_dim),
+                              dtype=np.float)
+
+        for i, gp in enumerate(self.gps):
+            for j in range(self.action_dim,self.gp.input_dim):
+                tmp_velocities = np.zeros((1, self.gp.input_dim),
+                                          dtype=np.float)
+
+                # lower and upper bounds on velocities
+                upper_velocity = 1000.
+                lower_velocity = 0.
+
+                # Binary search over optimal velocities
+                while True:
+                    mid = (upper_velocity + lower_velocity) / 2
+                    tmp_velocities[0, j] = mid
+                    # Calculates k(parameters,tmp_velocities); -> As stationary kernel k(x,x+d) = k(0,d)
+                    kernel_matrix = gp.kern.K(parameters, tmp_velocities)
+                    covariance = kernel_matrix.squeeze() / self.scaling[i] ** 2
+
+                    # Make sure the correlation is in the sweet spot
+                    velocity_enough = covariance > boundary_thresshold-0.01
+                    not_too_fast = covariance < boundary_thresshold
+
+                    if not_too_fast:
+                        upper_velocity = mid
+                    elif velocity_enough:
+                        lower_velocity = mid
+
+                    if ((not_too_fast and velocity_enough) or
+                            upper_velocity - lower_velocity < 1e-5):
+                        break
+
+                # Store optimal velocity
+                velocities[i, j-self.action_dim] = mid
+
+
+        if self.fmin[0]==-np.inf:
+            # Select the minimal velocity (for the toughest safety constraint)
+            velocities = np.min(velocities[1:,:], axis=0)
+        else:
+            velocities = np.min(velocities, axis=0)
+
+
+        # Scale for number of parameters (this might not be so clever if they
+        # are all independent, additive kernels).
+        velocities /= np.sqrt(self.gp.input_dim)
+        return velocities
 
     def compute_particle_distance(self,particles,X_data,full=False):
         """
@@ -2567,11 +2633,11 @@ class GoSafeSwarm(SafeOptSwarm):
 
                 # If we check full data we consider the safe set but also
                 # all points collected so far during experiments
-                if self.check_full_data:
-                    X_data=np.vstack((self._x,self.S))
+                #if self.check_full_data:
+                X_data=np.vstack((self._x,self.S))
 
-                else:
-                    X_data=self.S
+                #else:
+                #X_data=self.S
 
                 # Get the maximum covariance between particles and X_data
                 covariance = self.compute_particle_distance(particles,X_data)
@@ -2972,6 +3038,8 @@ class GoSafeSwarm(SafeOptSwarm):
             The next parameters that should be evaluated.
         """
 
+        if self.fast_boundary or self.fast_data_selection:
+            self.Update_data_lower_bounds()
 
         # compute estimate of the lower bound
         self.greedy, self.best_lower_bound = self.get_new_query_point('greedy')
@@ -3093,7 +3161,22 @@ class GoSafeSwarm(SafeOptSwarm):
         maxi = np.argmax(self._y[self.x_0_idx_gp_full_data,0])
         return self._x[self.x_0_idx_gp_full_data, :-self.state_dim][maxi,:], self._y[self.x_0_idx_gp_full_data, :][maxi,:]
 
-
+    def Update_data_lower_bounds(self):
+        '''
+        Updates the lower bounds for all the points in the dataset
+        '''
+        beta = self.beta(self.t)
+        difference = self._x.shape[0] - self.lower_bound_full_data.shape[0]
+        self.lower_bound_full_data = np.vstack((self.lower_bound_full_data, np.ones([difference, len(self.gps)]) * -np.inf))
+        # Evaluate lower bound and update constrained set lower bounds if increasing.
+        for i, gp in enumerate(self.gps):
+            # if self.fmin[i]==-np.inf:
+            #    continue
+            mean, var = gp.predict_noiseless(self._x)
+            mean = mean.squeeze()
+            std_dev = np.sqrt(var.squeeze())
+            lower_bound = mean - beta * std_dev
+            self.lower_bound_full_data[:, i] = np.maximum(self.lower_bound_full_data[:, i], lower_bound)
 
     def add_new_data_point(self, x, y, context=None):
         """
@@ -3180,8 +3263,8 @@ class GoSafeSwarm(SafeOptSwarm):
         x = np.atleast_2d(x)
         y = np.atleast_2d(y)
 
-        if self.num_contexts:
-            x = self._add_context(x, context)
+        #if self.num_contexts:
+        #    x = self._add_context(x, context)
 
         for i, gp in enumerate(self.gps):
             not_nan = ~np.isnan(y[:, i])
@@ -3270,79 +3353,96 @@ class GoSafeSwarm(SafeOptSwarm):
 
         """
         beta = self.beta(self.t)
-
-        at_boundary=False
-        Fail=False
+        at_boundary = False
+        Fail = False
         action = None
+
+        if self.fast_boundary:
+            data=np.vstack((self.S,self._x))
+            X=data[:,self.state_idx]
+            lb=np.vstack((self.lower_bound,self.lower_bound_full_data))
+            diff = X - state
+            diff = diff / self.L_states
+            squared_dist = np.sum(np.square(diff), axis=1)
+            idx = squared_dist <= self.state_squared_dist
+            constraint_idx = np.where(self.fmin != -np.inf)
+            constraint_idx = np.asarray(constraint_idx).reshape(-1, 1)
+            slack=lb[:,constraint_idx]-self.fmin[constraint_idx]
+            safe=np.sum(slack-self.eta_conservative*self.scaling[constraint_idx]>0,axis=1)==constraint_idx.shape[0]
+            safe=safe[idx]
+            if np.sum(safe)==0:
+                at_boundary=True
+                self.Failed_state_list.append(state)
+                idx_action = np.where(squared_dist == squared_dist.min())[0]
+                if len(idx_action) > 1:
+                    #lb = self.lower_bound[self.interior_points, :]
+                    idx_max = np.argmax(lb[idx_action, 0])
+                    idx_action = idx_action[idx_max]
+                # a_safe,f = self.get_maximum()
+
+                action = data[idx_action, :self.action_dim]
+
+            return at_boundary, Fail,action
+                #at_boundary = False
+
         # Check if we have any states in our safe set that are close to the state we are considering
-        diff = np.abs(self.S[:, self.state_idx] - state)
-        diff = (diff - self.optimal_velocities[self.state_idx]) <= 0
-        idx = np.sum(diff, axis=1) == self.state_dim
+        diff = self.S[:, self.state_idx] - state
+        diff = diff / self.L_states
+        squared_dist = np.sum(np.square(diff), axis=1)
+        idx = squared_dist<=self.state_squared_dist
         # If yes, use the constrained lower bounds to determine safety
         update_gp = False
         if np.sum(idx)>0:
             lower_bounds=self.lower_bound[idx,:]
-            slack=lower_bounds-self.fmin-self.eta*self.scaling*1.2
+            slack=lower_bounds-self.fmin-self.eta_conservative*self.scaling
             if np.any(np.sum(slack>0,axis=1) == len(self.gps)):
                 return at_boundary,Fail,action
 
         # If check_full_data is true, uses all the data from GP to check for boundary condition
-        if self.check_full_data:
-            # Find the closest state in the full data
-            full_data=self._x
-            # Find all states such that they are closer than the optimal velocities
-            # Computed for the swarms -> Have high covariance
-            diff=np.abs(full_data[:,self.state_idx]-state)
-            diff=(diff-self.optimal_velocities[self.state_idx])<=0
-            idx=np.sum(diff,axis=1)==self.state_dim
-            if np.sum(idx)==0:
-                # If no states fulfil the velocity condition, find the closest state
-                # in the L2 sense
-                diff = np.linalg.norm(full_data[:, self.state_idx]- state, axis=1)
-                closest_states_idx = np.where(diff == diff.min())[0]
-
-                closest_states = full_data[closest_states_idx, :]
-                closest_y = self._y[closest_states_idx, :]
-                closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
-                # check how many of the closest states are in the GP
-                in_gp = self.in_gp[closest_states_idx]
-            else:
-                closest_states = full_data[idx, :]
-                closest_y = self._y[idx, :]
-                closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
-                # check how many of the closest states are in the GP
-                in_gp=self.in_gp[idx]
-
-            size=np.minimum(closest_states.shape[0],10)
-            # If we do not have enough closest states in the GP, add them to the GP
-            if np.sum(in_gp)<=size:
-                X_prev = self.gps[0].X
-                update_gp=True
-                extra_points=np.random.choice(np.arange(closest_states.shape[0]),size=size,replace=False)
-                X_extra=closest_states[extra_points,:]
-                Y_extra=closest_y[extra_points,:]
-
-                X_new=np.vstack((X_prev,X_extra))
-
-
-            # Check if applying other actions guarantee safety --> Pick safe actions from the closest state
-            alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(full_data)[1]])
-            alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
-            alternative_options[:, self.state_idx] = state
-
-
-
-        # Same process as above but we only consider points in S
-        else:
-            diff = np.linalg.norm(self.S[:, self.state_idx] - state, axis=1)
+        #if self.check_full_data:
+        # Find the closest state in the full data
+        full_data=self._x
+        # Find all states such that they are closer than the optimal velocities
+        # Computed for the swarms -> Have high covariance
+        diff = full_data - state
+        diff = diff / self.L_states
+        squared_dist = np.sum(np.square(diff), axis=1)
+        idx = squared_dist <= self.state_squared_dist
+        if np.sum(idx)==0:
+            # If no states fulfil the velocity condition, find the closest state
+            # in the L2 sense
+            diff = np.linalg.norm(full_data[:, self.state_idx]- state, axis=1)
             closest_states_idx = np.where(diff == diff.min())[0]
-            closest_states = self.S[closest_states_idx, :]
-            closest_states = closest_states.reshape(-1, np.shape(self.S)[1])
 
-            # Check if applying other actions guarantee safety
-            alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(self.S)[1]])
-            alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
-            alternative_options[:, self.state_idx] = state
+            closest_states = full_data[closest_states_idx, :]
+            closest_y = self._y[closest_states_idx, :]
+            closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+            # check how many of the closest states are in the GP
+            in_gp = self.in_gp[closest_states_idx]
+        else:
+            closest_states = full_data[idx, :]
+            closest_y = self._y[idx, :]
+            closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+            # check how many of the closest states are in the GP
+            in_gp=self.in_gp[idx]
+
+        size=np.minimum(closest_states.shape[0],10)
+        # If we do not have enough closest states in the GP, add them to the GP
+        if np.sum(in_gp)<=size:
+            X_prev = self.gps[0].X
+            update_gp=True
+            extra_points=np.random.choice(np.arange(closest_states.shape[0]),size=size,replace=False)
+            X_extra=closest_states[extra_points,:]
+            Y_extra=closest_y[extra_points,:]
+
+            X_new=np.vstack((X_prev,X_extra))
+
+
+        # Check if applying other actions guarantee safety --> Pick safe actions from the closest state
+        alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(full_data)[1]])
+        alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
+        alternative_options[:, self.state_idx] = state
+
 
         # If we want to add new data points to our GP
         if update_gp:
@@ -3416,53 +3516,68 @@ class GoSafeSwarm(SafeOptSwarm):
            If yes, these experiments are removed from the GP
         """""
         # Check if we have any failed experiments
-        if self.Failed_experiment_list:
-            beta=self.beta(self.t)
 
-            # Indicates if we are using the full data (from GP and safe set) to evaluate safety
-            if self.check_full_data:
-                # Loop over all states at which we hit the boundary -> In reverse order, allows popping of list
-                #full_data = np.vstack((self._x, self.S))
+
+        if self.Failed_experiment_list:
+            beta = self.beta(self.t)
+
+            if self.fast_boundary:
+                self.Update_data_lower_bounds()
+                for i, state in reversed(list(enumerate(self.Failed_state_list))):
+                    X = np.vstack((self.S[:, self.state_idx], self._x[:, self.state_idx]))
+                    lb = np.vstack((self.lower_bound, self.lower_bound_full_data))
+                    diff = X - state
+                    diff = diff / self.L_states
+                    squared_dist = np.sum(np.square(diff), axis=1)
+                    idx = squared_dist <= self.state_squared_dist
+                    constraint_idx = np.where(self.fmin != -np.inf)
+                    constraint_idx = np.asarray(constraint_idx).reshape(-1, 1)
+                    slack = lb[:, constraint_idx] - self.fmin[constraint_idx]
+                    safe = np.sum(slack - self.eta_conservative * self.scaling[constraint_idx] > 0, axis=1) == constraint_idx.shape[0]
+                    if np.sum(safe)>0:
+                        self.Failed_experiment_list.pop(i)
+                        self.Failed_state_list.pop(i)
+            else:
                 full_data=self._x
                 for i,state in reversed(list(enumerate(self.Failed_state_list))):
-
-                    # Find the set of close states as done for the boundary condition function
-                    diff = np.abs(self.S[:, self.state_idx] - state)
-                    diff = (diff - self.optimal_velocities[self.state_idx]) <= 0
-                    idx = np.sum(diff, axis=1) == self.state_dim
-                    if np.sum(idx) > 0:
-                        lower_bounds = self.lower_bound[idx, :]
-                        slack = lower_bounds - self.fmin - self.eta * self.scaling * 1.2
-                        at_boundary=bool(1-np.any(np.sum(slack>0,axis=1) == len(self.gps)))
-                        if not at_boundary:
-                            self.Failed_experiment_list.pop(i)
-                            self.Failed_state_list.pop(i)
-                            continue
-                    # Find closest state in the full dataset
-                    update_gp = False
-                    diff = np.abs(full_data[:, self.state_idx] - state)
-                    diff=(diff-self.optimal_velocities[self.state_idx])<=0
-                    idx = np.sum(diff, axis=1) == self.state_dim
+                    diff = full_data - state
+                    diff = diff / self.L_states
+                    squared_dist = np.sum(np.square(diff), axis=1)
+                    idx = squared_dist <= self.state_squared_dist
                     if np.sum(idx) == 0:
+                        # If no states fulfil the velocity condition, find the closest state
+                        # in the L2 sense
                         diff = np.linalg.norm(full_data[:, self.state_idx] - state, axis=1)
                         closest_states_idx = np.where(diff == diff.min())[0]
+
                         closest_states = full_data[closest_states_idx, :]
                         closest_y = self._y[closest_states_idx, :]
                         closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+                        # check how many of the closest states are in the GP
                         in_gp = self.in_gp[closest_states_idx]
                     else:
                         closest_states = full_data[idx, :]
                         closest_y = self._y[idx, :]
                         closest_states = closest_states.reshape(-1, np.shape(full_data)[1])
+                        # check how many of the closest states are in the GP
                         in_gp = self.in_gp[idx]
 
-                    # Check if applying other actions guarantees safety
+                    size = np.minimum(closest_states.shape[0], 10)
+                    # If we do not have enough closest states in the GP, add them to the GP
+                    if np.sum(in_gp) <= size:
+                        X_prev = self.gps[0].X
+                        update_gp = True
+                        extra_points = np.random.choice(np.arange(closest_states.shape[0]), size=size, replace=False)
+                        X_extra = closest_states[extra_points, :]
+                        Y_extra = closest_y[extra_points, :]
+
+                        X_new = np.vstack((X_prev, X_extra))
+
+                    # Check if applying other actions guarantee safety --> Pick safe actions from the closest state
                     alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(full_data)[1]])
                     alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
                     alternative_options[:, self.state_idx] = state
 
-                    # Check if we have enough data points for the state in the GP
-                    size = np.minimum(closest_states.shape[0], 10)
                     if np.sum(in_gp) <= size:
                         X_prev = self.gps[0].X
                         update_gp = True
@@ -3519,45 +3634,6 @@ class GoSafeSwarm(SafeOptSwarm):
                             self.Failed_experiment_list.pop(i)
                             self.Failed_state_list.pop(i)
 
-
-            # Same process as above but we only look safe states in S
-            else:
-                for i,state in reversed(list(enumerate(self.Failed_state_list))):
-
-                    # Find the closest safe state
-                    diff = np.abs(self.S[:, self.state_idx] - state)
-                    diff=(diff-self.optimal_velocities[self.state_idx])<=0
-                    idx = np.sum(diff, axis=1) == self.state_dim
-                    if np.sum(idx) == 0:
-                        diff = np.linalg.norm(self.S[:, self.state_idx] - state, axis=1)
-                        closest_states_idx = np.where(diff == diff.min())[0]
-                        closest_states = self.S[closest_states_idx, :]
-                        closest_states = closest_states.reshape(-1, np.shape(self.S)[1])
-                    else:
-                        closest_states = self.S[idx, :]
-                        closest_states = closest_states.reshape(-1, np.shape(self.S)[1])
-
-                    # Check if applying other actions guarantee safety
-                    alternative_options = np.zeros([np.shape(closest_states)[0], np.shape(self.S)[1]])
-                    alternative_options[:, :-self.state_dim] = closest_states[:, :-self.state_dim]
-                    alternative_options[:, self.state_idx] = state
-
-                    for j, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
-                        mean, var = gp.predict_noiseless(alternative_options)
-                        mean = mean.squeeze()
-                        std_dev = np.sqrt(var.squeeze())
-                        lower_bound = np.atleast_1d(mean - beta * std_dev)
-
-                        # If false, we satisfy constraints with a good tolerance
-                        at_boundary = np.all(lower_bound - self.fmin[j] - self.tol * std_dev - self.eta * scaling < 0)
-
-                        if at_boundary:
-                            continue
-
-                    if not at_boundary:
-                        self.Failed_experiment_list.pop(i)
-                        self.Failed_state_list.pop(i)
-
     def select_gp_subset(self,method=1):
         """""
                    
@@ -3577,172 +3653,205 @@ class GoSafeSwarm(SafeOptSwarm):
                                   points with the largest values and the remaining points are chosen at random from the dataset
                                   
          """""
-        # Find all points with IC other than the ones close to x_0
-        X = self._x
-        Y=self._y
-        #idx_rest = [x for x in list(range(X.shape[0])) if x not in self.x_0_idx_gp_full_data]
-        diff=np.abs(self._x[:,self.state_idx]-self.x_0)
-        diff = (diff - self.optimal_velocities[self.state_idx]) > 0
-        idx_rest = np.sum(diff, axis=1) >0
-        idx_rest=np.arange(X.shape[0],dtype=int)[idx_rest]
-        if np.sum(idx_rest)<self.N_reset:
-            idx_rest = [x for x in list(range(X.shape[0])) if x not in self.x_0_idx_gp_full_data]
-        # Check if non x_0 points are greater than N_reset
-        if len(idx_rest)> self.N_reset:
-            # Determine number of boundary points we want for our GP
-            set_size = int(self.N_reset * self.boundary_ratio)
-            # Calculate the remaining interior points
-            interior_size = self.N_reset - set_size
-            X = X[idx_rest, :]
-            Y = Y[idx_rest, :]
-            # Swarm Optimization Method
-            if method==1:
-                # Get expander points
-                expander_points=self.get_boundary_particles(total_size=300)
-                np.random.shuffle(expander_points)
-                # np.random.shuffle(interior_particles)
-                # # Determine covariance between the data and expander points,
-                # # here we take the minimum of the covariance between the GPs
-                covariance=self.compute_particle_distance(expander_points,X,full=True)
-                # # Find unique points with the highest covariance -> Boundary points
-                idx_boundary=np.argmax(covariance,axis=1)
-                idx_boundary=np.unique(idx_boundary)
-                if idx_boundary.shape[0] >= set_size:
-                     idx_boundary = np.random.choice(idx_boundary,set_size,replace=False)
-                     idx_boundary=idx_boundary.reshape(-1,1)
-                else:
-                    idx_boundary = idx_boundary.reshape(-1, 1)
-                    # # Get covariance ranking matrix
-                    covariance_rankings=np.argsort(np.argsort(covariance))
-                    n_points=X.shape[0]
-                    # idx_full=np.unique(idx_full).reshape(-1,1)
-                    # # Loop over all candidate to select subset
-                    for i in range(1,n_points):
-                        # If enough data points for the boundary and interior have been selected, exit the loop
-                        if idx_boundary.shape[0]>= set_size:
-                            break
-                        # If more boundary points are required, pick those which have a high covariance with the expanders
-                        # High rank
-                        rows,idx=np.where(covariance_rankings==n_points -i-1)
-                        idx=np.unique(idx)
-                        # Add new points to the boundary idx, make sure they are all unique
-                        idx_boundary=np.vstack((idx_boundary,idx.reshape(-1,1)))
-                        idx_boundary=np.unique(idx_boundary)
-                        idx_boundary=np.asarray(idx_boundary)
-                        idx_boundary=idx_boundary.reshape(-1,1)
+        if self.fast_data_selection:
+            # Determine slack for all the points in the dataset
+            constraint_idx = np.where(self.fmin != -np.inf)
+            constraint_idx = np.asarray(constraint_idx).reshape(-1, 1)
+            slack = self.lower_bound_full_data[:, constraint_idx] - self.fmin[constraint_idx] - self.eta_conservative * self.scaling[
+                constraint_idx]
+
+            if len(constraint_idx) > 1:
+                slack = np.min(slack, axis=1)
+            slack = slack.squeeze()
+            # Consider all points other than the ones for x_0.
+            idx_rest = [x for x in list(range(self._x.shape[0])) if x not in self.x_0_idx_gp_full_data]
+            # Determine probability proportional to the lower bound and sample based on it
+            slack_rest = slack[idx_rest]
+            dist = np.exp(-5 * (slack_rest ** 2))
+            prob = dist / np.sum(dist)
+            random_id = np.random.choice(idx_rest, size=self.N_reset, p=prob,replace=False)
+            X_full = self._x[random_id, :]
+            X_full = np.vstack((self._x[self.x_0_idx_gp_full_data, :], X_full))
+            Y_full = self._y[random_id, :]
+            Y_full = Y_full.squeeze()
+            Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :], Y_full))
+            self.in_gp[:] = False
+            self.in_gp[self.x_0_idx_gp_full_data] = True
+            self.in_gp[random_id] = True
+            self.x_0_idx_gp = np.arange(start=0, stop=self._x[self.x_0_idx_gp_full_data, :].shape[0], step=1)
+            # set GP points
+            for i, gp in enumerate(self.gps):
+                gp.set_XY(X_full, Y_full[:, i].reshape(-1, 1))
+
+
+        else:
+            # Find all points with IC other than the ones close to x_0
+            X = self._x
+            Y=self._y
+            #idx_rest = [x for x in list(range(X.shape[0])) if x not in self.x_0_idx_gp_full_data]
+            diff=self._x[:,self.state_idx]-self.x_0
+            diff = diff / self.L_states
+            squared_dist = np.sum(np.square(diff), axis=1)
+            idx_rest = squared_dist > self.state_squared_dist
+            idx_rest=np.arange(X.shape[0],dtype=int)[idx_rest]
+            if np.sum(idx_rest)<self.N_reset:
+                idx_rest = [x for x in list(range(X.shape[0])) if x not in self.x_0_idx_gp_full_data]
+            # Check if non x_0 points are greater than N_reset
+            if len(idx_rest)> self.N_reset:
+                # Determine number of boundary points we want for our GP
+                set_size = int(self.N_reset * self.boundary_ratio)
+                # Calculate the remaining interior points
+                interior_size = self.N_reset - set_size
+                X = X[idx_rest, :]
+                Y = Y[idx_rest, :]
+                # Swarm Optimization Method
+                if method==1:
+                    # Get expander points
+                    expander_points=self.get_boundary_particles(total_size=300)
+                    np.random.shuffle(expander_points)
+                    # np.random.shuffle(interior_particles)
+                    # # Determine covariance between the data and expander points,
+                    # # here we take the minimum of the covariance between the GPs
+                    covariance=self.compute_particle_distance(expander_points,X,full=True)
+                    # # Find unique points with the highest covariance -> Boundary points
+                    idx_boundary=np.argmax(covariance,axis=1)
+                    idx_boundary=np.unique(idx_boundary)
+                    if idx_boundary.shape[0] >= set_size:
+                         idx_boundary = np.random.choice(idx_boundary,set_size,replace=False)
+                         idx_boundary=idx_boundary.reshape(-1,1)
+                    else:
+                        idx_boundary = idx_boundary.reshape(-1, 1)
+                        # # Get covariance ranking matrix
+                        covariance_rankings=np.argsort(np.argsort(covariance))
+                        n_points=X.shape[0]
+                        # idx_full=np.unique(idx_full).reshape(-1,1)
+                        # # Loop over all candidate to select subset
+                        for i in range(1,n_points):
+                            # If enough data points for the boundary and interior have been selected, exit the loop
+                            if idx_boundary.shape[0]>= set_size:
+                                break
+                            # If more boundary points are required, pick those which have a high covariance with the expanders
+                            # High rank
+                            rows,idx=np.where(covariance_rankings==n_points -i-1)
+                            idx=np.unique(idx)
+                            # Add new points to the boundary idx, make sure they are all unique
+                            idx_boundary=np.vstack((idx_boundary,idx.reshape(-1,1)))
+                            idx_boundary=np.unique(idx_boundary)
+                            idx_boundary=np.asarray(idx_boundary)
+                            idx_boundary=idx_boundary.reshape(-1,1)
 
 
 
 
 
 
-                # Randomly pick the remaining points, here considered to be the interior points
-                idx_interior=[x for x in np.arange(X.shape[0]) if x not in idx_boundary]
-                idx_interior=np.asarray(idx_interior)
-                X_exterior=X[idx_boundary.squeeze(),:]
-                X_interior=X[idx_interior,:]
+                    # Randomly pick the remaining points, here considered to be the interior points
+                    idx_interior=[x for x in np.arange(X.shape[0]) if x not in idx_boundary]
+                    idx_interior=np.asarray(idx_interior)
+                    X_exterior=X[idx_boundary.squeeze(),:]
+                    X_interior=X[idx_interior,:]
 
-                # Pick points based on a probability proportional to -covariance with boundary points
-                covariance_interior=self.compute_particle_distance(X_interior,np.vstack((X_exterior,self._x[self.x_0_idx_gp_full_data,:])))
-                #covariance_interior=np.max(covariance_interior,axis=1)
-                p=np.exp(-5*covariance_interior)
-                p/=np.sum(p)
-
-
-                idx_interior=np.random.choice(idx_interior,interior_size,p=p,replace=False)
-
-                # import matplotlib.pyplot as plt
-                # fig_plot = plt.figure(figsize=(14, 14))
-                # left, bottom, width, height = 0.1, 0.1, 0.8, 0.8
-                # ax_plot = fig_plot.add_axes([left, bottom, width, height])
-                # ax_plot.scatter(self._x[:, 0], self._x[:, 1], c="Darkred", label="Remaining points")
-                # ax_plot.scatter(X[idx_boundary, 0], X[idx_boundary, 1], c="blue", label="Boundary Points")
-                # ax_plot.scatter(X[idx_interior, 0], X[idx_interior, 1], c="green", label="Interior Points")
-                # ax_plot.set_title('All data points and data points in GP')
-                # #
-                # ax_plot.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
-                #                 fancybox=True, shadow=True, ncol=5, title="Data selection scheme")
-                # ax_plot.set_xlabel('a')
-                # ax_plot.set_ylabel('x')
-                # ax_plot.set_xlim([-6.5, 6.5])
-                # ax_plot.set_ylim([-0.8, 0.8])
-                # name = "Data points in GP after" + ".png"
-                # fig_plot.savefig(name, dpi=300)
-                # Determine the full data we are going to use for the GP
-                idx_full=np.vstack((idx_boundary,idx_interior.reshape(-1,1)))
-                X_full=X[idx_full,:]
-                X_full=X_full.squeeze()
-                X_full = np.vstack((self._x[self.x_0_idx_gp_full_data,:],X_full))
-
-                Y_full=Y[idx_full,:]
-                Y_full = Y_full.squeeze()
-                Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :],Y_full))
+                    # Pick points based on a probability proportional to -covariance with boundary points
+                    covariance_interior=self.compute_particle_distance(X_interior,np.vstack((X_exterior,self._x[self.x_0_idx_gp_full_data,:])))
+                    #covariance_interior=np.max(covariance_interior,axis=1)
+                    p=np.exp(-5*covariance_interior)
+                    p/=np.sum(p)
 
 
-                # Update the in_gp vector -> True if the data point is in GP
-                self.in_gp[:]=False
-                self.in_gp[self.x_0_idx_gp_full_data]=True
-                remainder=self.in_gp[idx_rest]
-                remainder[idx_full]=True
-                self.in_gp[idx_rest]=remainder
+                    idx_interior=np.random.choice(idx_interior,interior_size,p=p,replace=False)
+
+                    # import matplotlib.pyplot as plt
+                    # fig_plot = plt.figure(figsize=(14, 14))
+                    # left, bottom, width, height = 0.1, 0.1, 0.8, 0.8
+                    # ax_plot = fig_plot.add_axes([left, bottom, width, height])
+                    # ax_plot.scatter(self._x[:, 0], self._x[:, 1], c="Darkred", label="Remaining points")
+                    # ax_plot.scatter(X[idx_boundary, 0], X[idx_boundary, 1], c="blue", label="Boundary Points")
+                    # ax_plot.scatter(X[idx_interior, 0], X[idx_interior, 1], c="green", label="Interior Points")
+                    # ax_plot.set_title('All data points and data points in GP')
+                    # #
+                    # ax_plot.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
+                    #                 fancybox=True, shadow=True, ncol=5, title="Data selection scheme")
+                    # ax_plot.set_xlabel('a')
+                    # ax_plot.set_ylabel('x')
+                    # ax_plot.set_xlim([-6.5, 6.5])
+                    # ax_plot.set_ylim([-0.8, 0.8])
+                    # name = "Data points in GP after" + ".png"
+                    # fig_plot.savefig(name, dpi=300)
+                    # Determine the full data we are going to use for the GP
+                    idx_full=np.vstack((idx_boundary,idx_interior.reshape(-1,1)))
+                    X_full=X[idx_full,:]
+                    X_full=X_full.squeeze()
+                    X_full = np.vstack((self._x[self.x_0_idx_gp_full_data,:],X_full))
+
+                    Y_full=Y[idx_full,:]
+                    Y_full = Y_full.squeeze()
+                    Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :],Y_full))
+
+
+                    # Update the in_gp vector -> True if the data point is in GP
+                    self.in_gp[:]=False
+                    self.in_gp[self.x_0_idx_gp_full_data]=True
+                    remainder=self.in_gp[idx_rest]
+                    remainder[idx_full]=True
+                    self.in_gp[idx_rest]=remainder
 
 
             # apply scheme 2-> Define objective function and pick best points based on
             # the objective
-            elif method==2:
-                # Method:
-                # Evaluate objective function for each data point
-                beta=self.beta(self.t)
-                interest_function = (len(self.gps) *
-                                     np.ones(X.shape[0], dtype=np.float))
-                values=np.zeros(X.shape[0])
-                slack_min=np.ones(X.shape[0])*np.inf
-                for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
+                elif method==2:
+                    # Method:
+                    # Evaluate objective function for each data point
+                    beta=self.beta(self.t)
+                    interest_function = (len(self.gps) *
+                                         np.ones(X.shape[0], dtype=np.float))
+                    values=np.zeros(X.shape[0])
+                    slack_min=np.ones(X.shape[0])*np.inf
+                    for i, (gp, scaling) in enumerate(zip(self.gps, self.scaling)):
 
-                    if self.fmin[i] == -np.inf:
-                        continue
-                    mean, var = gp.predict_noiseless(X)
-                    mean = mean.squeeze()
-                    std_dev = np.sqrt(var.squeeze())
-                    lower_bound = mean - beta*std_dev
-                    slack=np.atleast_1d(lower_bound - self.fmin[i])
-                    slack /=scaling
-                    values=np.maximum(values,std_dev/scaling)
-                    slack_min=np.minimum(slack,slack_min)
-
-
-                # Determine the interest function
-                interest_function*=norm.pdf(slack_min,scale=0.2)
-
-                # function to sort the array based on maximum values
-                def sort_generator(array):
-                    """Return the sorted array, largest element first."""
-                    return array.argsort()[::-1]
-                # Sort the objective by interest_function*values
-                score=interest_function*values
-                idx_sorted = sort_generator(score)
-                # Pick the boundary points as the ones with the highest values
-                expander_size=int(set_size*0.75)
-                idx_boundary = idx_sorted[:set_size]
-                idx_sorted2=sort_generator(interest_function) #Points with low lowerbounds only
-                idx_boundary2=idx_sorted2[:set_size-expander_size]
-                idx_boundary=np.vstack((idx_boundary.reshape(-1,1),idx_boundary2.reshape(-1,1)))
-                # Sample interior points at random from the remaining ones
-
-                idx_interior = [x for x in list(range(X.shape[0])) if x not in idx_boundary]
-                idx_interior=np.random.choice(idx_interior,size=interior_size)
-                idx_full = np.vstack((idx_boundary.reshape(-1,1), idx_interior.reshape(-1,1)))
+                        if self.fmin[i] == -np.inf:
+                            continue
+                        mean, var = gp.predict_noiseless(X)
+                        mean = mean.squeeze()
+                        std_dev = np.sqrt(var.squeeze())
+                        lower_bound = mean - beta*std_dev
+                        slack=np.atleast_1d(lower_bound - self.fmin[i])
+                        slack /=scaling
+                        values=np.maximum(values,std_dev/scaling)
+                        slack_min=np.minimum(slack,slack_min)
 
 
+                    # Determine the interest function
+                    interest_function*=norm.pdf(slack_min,scale=0.2)
 
-                # Define full data matrix for the GP
-                X_full = X[idx_full, :]
-                X_full = X_full.squeeze()
-                X_full = np.vstack((self._x[self.x_0_idx_gp_full_data, :], X_full))
+                    # function to sort the array based on maximum values
+                    def sort_generator(array):
+                        """Return the sorted array, largest element first."""
+                        return array.argsort()[::-1]
+                    # Sort the objective by interest_function*values
+                    score=interest_function*values
+                    idx_sorted = sort_generator(score)
+                    # Pick the boundary points as the ones with the highest values
+                    expander_size=int(set_size*0.75)
+                    idx_boundary = idx_sorted[:set_size]
+                    idx_sorted2=sort_generator(interest_function) #Points with low lowerbounds only
+                    idx_boundary2=idx_sorted2[:set_size-expander_size]
+                    idx_boundary=np.vstack((idx_boundary.reshape(-1,1),idx_boundary2.reshape(-1,1)))
+                    # Sample interior points at random from the remaining ones
 
-                Y_full = Y[idx_full, :]
-                Y_full = Y_full.squeeze()
-                Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :], Y_full))
+                    idx_interior = [x for x in list(range(X.shape[0])) if x not in idx_boundary]
+                    idx_interior=np.random.choice(idx_interior,size=interior_size)
+                    idx_full = np.vstack((idx_boundary.reshape(-1,1), idx_interior.reshape(-1,1)))
+
+
+
+                    # Define full data matrix for the GP
+                    X_full = X[idx_full, :]
+                    X_full = X_full.squeeze()
+                    X_full = np.vstack((self._x[self.x_0_idx_gp_full_data, :], X_full))
+
+                    Y_full = Y[idx_full, :]
+                    Y_full = Y_full.squeeze()
+                    Y_full = np.vstack((self._y[self.x_0_idx_gp_full_data, :], Y_full))
 
             # Update gp idx
             self.x_0_idx_gp = np.arange(start=0, stop=self._x[self.x_0_idx_gp_full_data, :].shape[0], step=1)
@@ -5084,7 +5193,7 @@ class GoSafeSwarm_Contextual(SafeOptSwarm):
         slack_rest=slack[idx_rest]
         dist=np.exp(-5*(slack_rest**2))
         prob=dist/np.sum(dist)
-        random_id = np.random.choice(idx_rest,size=self.N_reset, p=prob)
+        random_id = np.random.choice(idx_rest,size=self.N_reset, p=prob,replace=False)
         X_full=self._x[random_id,:]
         X_full=np.vstack((self._x[self.x_0_idx_full_data,:],X_full))
         Y_full = self._y[random_id, :]
