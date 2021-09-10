@@ -24,7 +24,7 @@ from .swarm import SwarmOptimization
 import logging
 
 
-__all__ = ['SafeOpt', 'SafeOptSwarm',"GoSafe","GoSafeSwarm"]
+__all__ = ['SafeOpt', 'SafeOptSwarm',"GoSafeSwarm_Contextual"]
 
 
 class GaussianProcessOptimization(object):
