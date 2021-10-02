@@ -8,7 +8,8 @@ This code is build upon the SafeOpt repository from https://github.com/befelix/S
 It implements Contextual GoSafe, an extension of [1]_ based on particle swarms, as proposed by [2]_, which can be applied for general high dimensional tasks.
 
 
-.. [1] D. Baumann, A. Marco, M. Turchetta, S. Trimpe, `GoSafe: Globally op-timal safe robot learning`<https://arxiv.org/abs/2105.13281>_, 
+.. [1] D.Baumann, A.Marco, M.Turchetta, S.Trimpe, 
+`GoSafe: Globally op-timal safe robot learning <https://arxiv.org/abs/2105.13281>`_, 
 in IEEE International Conference on Roboticsand Automation (ICRA), 2021.
 
 .. [2] Rikky R.P.R. Duivenvoorden, Felix Berkenkamp, Nicolas Carion, Andreas Krause, Angela P. Schoellig,
