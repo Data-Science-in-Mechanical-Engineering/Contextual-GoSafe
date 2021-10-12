@@ -16,10 +16,16 @@ It implements Contextual GoSafe, an extension of [1]_ based on particle swarms, 
   `Constrained Bayesian optimization with Particle Swarms for Safe Adaptive Controller Tuning <http://www.dynsyslab.org/wp-content/papercite-data/pdf/duivenvoorden-ifac17.pdf>`_,
   in Proc. of the IFAC (International Federation of Automatic Control) World Congress, 2017.
 
+Contributions:
+---------------
+SafeOpt, SafeOptSwarm developed by Felix Berkenkamp
+
+Contextual_GoSafe developed by Bhavya Sukhija
+
 
 Warning: Maintenance mode
 -------------------------
-This package is no longer actively maintained. That bein said, pull requests to add functionality or fix bugs are always welcome.
+This SafeOpt and SafeOptSwarm implementation is no longer actively maintained. That bein said, pull requests to add functionality or fix bugs are always welcome.
 
 Installation
 ------------
