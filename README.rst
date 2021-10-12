@@ -25,7 +25,7 @@ Contextual_GoSafe developed by Bhavya Sukhija
 
 Warning: Maintenance mode
 -------------------------
-This SafeOpt and SafeOptSwarm implementation is no longer actively maintained. That bein said, pull requests to add functionality or fix bugs are always welcome.
+This SafeOpt and SafeOptSwarm implementation is no longer actively maintained. That being said, pull requests to add functionality or fix bugs are always welcome.
 
 Installation
 ------------
