@@ -292,7 +292,7 @@ class Optimizer(object):
 
 
 
-def Optimize(num_experiments=2):
+def Optimize(num_experiments=91):
 	"""
 	Performs full optimization for num_experiments iterations
 	"""
@@ -361,8 +361,7 @@ def Optimize(num_experiments=2):
 			df2 = pd.DataFrame([[x[j, 0], x[j, 1], y[j, 0], y[j, 1], "S0", 0, 0]],
 							   columns=['a', "x", "f", "g", "criteria", "boundary", "Fail"])
 			df = df.append(df2)
-	#
-	plot_gp_data=False
+	
 
 	plt_indicator=0
 	prev_plt_indicator=0
