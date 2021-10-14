@@ -3,9 +3,7 @@ Contextual GoSafe - Safe Bayesian Optimization
 ====================================
 
 
-
-This code is build upon the SafeOpt repository from https://github.com/befelix/SafeOpt.
-It implements Contextual GoSafe, an extension of [1]_ based on particle swarms, as proposed by [2]_, which can be applied for general high dimensional tasks.
+This repository is the official implementation accompanying the paper "GoSafeCon: Contextual Safe Learning of Global Optima" by Bhavya Sukhija, Matteo Turchetta, David Lindner, Andreas Krause, Sebastian Trimpe, and Dominik Baumann. It builds upon the SafeOpt code provided at https://github.com/befelix/SafeOpt. GoSafeCon is an extension of [1]_ based on particle swarms, as proposed by [2]_, which can be applied for general high dimensional tasks.
 
 
 .. [1] D.Baumann, A.Marco, M.Turchetta, S.Trimpe,
@@ -42,6 +40,6 @@ The code is licenced under the MIT license and free to use by anyone without any
 Reproducing Results
 -------------------
 
-To reproduce our simulation results from Franka arm, the repository: https://github.com/Data-Science-in-Mechanical-Engineering/franka-emika-panda-simulation is required.
+To reproduce our simulation results, the repository: https://github.com/Data-Science-in-Mechanical-Engineering/franka-emika-panda-simulation is required.
 
 An example of contextual GoSafe on a 1D toy example is also provided in the examples folder.
