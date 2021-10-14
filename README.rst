@@ -42,6 +42,6 @@ The code is licenced under the MIT license and free to use by anyone without any
 Reproducing Results
 -------------------
 
-To reproduce our simulation results from Franka arm, the repository: https://github.com/Data-Science-in-Mechanical-Engineering/franka-emika-panda-simulation
+To reproduce our simulation results from Franka arm, the repository: https://github.com/Data-Science-in-Mechanical-Engineering/franka-emika-panda-simulation is required.
 
 An example of contextual GoSafe on a 1D toy example is also provided in the examples folder.
