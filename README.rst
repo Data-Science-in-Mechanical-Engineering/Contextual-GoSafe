@@ -22,11 +22,6 @@ SafeOpt, SafeOptSwarm developed by Felix Berkenkamp
 
 Contextual_GoSafe developed by Bhavya Sukhija
 
-
-Warning: Maintenance mode
--------------------------
-This SafeOpt and SafeOptSwarm implementation is no longer actively maintained. That being said, pull requests to add functionality or fix bugs are always welcome.
-
 Installation
 ------------
 The easiest way to install the necessary python libraries is by installing pip (e.g. ``apt-get install python-pip`` on Ubuntu) and running
@@ -42,3 +37,11 @@ License
 -------
 
 The code is licenced under the MIT license and free to use by anyone without any restrictions.
+
+
+Reproducing Results
+-------------------
+
+To reproduce our simulation results from Franka arm, the repository: https://github.com/Data-Science-in-Mechanical-Engineering/franka-emika-panda-simulation
+
+An example of contextual GoSafe on a 1D toy example is also provided in the examples folder.
