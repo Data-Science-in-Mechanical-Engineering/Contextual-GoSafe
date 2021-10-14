@@ -24,6 +24,11 @@ np.random.seed(10)
 
 
 class mod_sys:
+	"""
+	class used to define 1D nonlinear system
+
+	"""
+
 	def __init__(self,k_init=0,x_des=0,high=0.8):
 		self.a = 1.01
 		self.b = -0.2
@@ -49,6 +54,10 @@ class mod_sys:
 
 
 def generate_heat_map(n_points):
+	"""
+	Performs grid search to generate a map for the objective and constraint function
+	with respect to the parameters and initial states.
+	"""
 	overall_points=int(3*n_points/5)
 	a1 = np.linspace(-6,6,overall_points)
 	a2=np.linspace(-1,1,n_points-overall_points)
@@ -79,6 +88,9 @@ def generate_heat_map(n_points):
 
 
 def plot_function(n_points=101):
+	"""
+	Plots the objetive function and safe set.
+	"""
 	a = np.linspace(-6, 6, n_points)
 	sys = mod_sys()
 	n_steps = 1000
@@ -120,6 +132,9 @@ def plot_function(n_points=101):
 	fig_f.savefig(name, dpi=300)
 
 class Optimizer(object):
+	"""
+	Defines the optimizer
+	"""
 	def __init__(self,initial_k=1,high=0.9,f_min=-np.inf,num_it=1000,lengthscale=0.5,ARD=True,variance=10000,eta=0.5):
 
 		self.Fail = False
@@ -133,15 +148,17 @@ class Optimizer(object):
 		self.rollout_values=[0,0]
 		self.rollout_limit = 10
 		self.rollout_data = []
-		self.horizon_cost = np.zeros(self.num_it + 1)
-		self.simulate()
+		# Define bounds for parameters
 		bounds = [[-6, 5]]
-		#parameter_set=linearly_spaced_combinations(bounds,num_samples=100)
+		self.horizon_cost = np.zeros(self.num_it + 1)
+        # Simulate to gather initial safe policy
+		self.simulate()
 		y1 = np.array([[self.rollout_values[0]]])
 		y1 = y1.reshape(-1, 1)
 		y2 = np.array([[self.rollout_values[1]]])
 		y2 = y2.reshape(-1, 1)
 		L  = [lengthscale,0.2]
+        # GPs.
 		a=np.asarray([[self.sys.k]])
 		x = np.array([[self.sys.k, 0]])
 		KERNEL_f = GPy.kern.sde_Matern32(input_dim=x.shape[1], lengthscale=L, ARD=ARD,variance=variance)
@@ -156,8 +173,7 @@ class Optimizer(object):
 
 
 
-		#self.opt = GoSafe([gp1, gp2], parameter_set, fmin=[f_min, -high**2], x_0=np.array([[0]]), eps=eps, max_ic_expansions=max_ic_expansions,
-		#			 eta=eta,tol=tol,lipschitz=lipschitz)
+		# Set up optimizer
 		L_states=L[1]
 		self.opt=Contextual_GoSafe(gp=[gp1, gp2],gp_full=[gp_full1,gp_full2],L_states=L_states,bounds=bounds,fmin=[f_min, -high**2],x_0=np.array([[0]]),eta_L=eta,max_S1_steps=30,max_S3_steps=10,eps=0.1,max_data_size=100,reset_size=20) #worked for maxS2_steps=100
 		params = np.linspace(2, 3, 2)
@@ -166,15 +182,18 @@ class Optimizer(object):
 
 
 	def reset(self,x_0=None):
-		self.sys.reset(x_0)
-		self.Fail=False
-		self.at_boundary=False
-		self.rollout_values = [0, 0]
-		self.rollout_data=[]
-		self.horizon_cost = np.zeros(self.num_it + 1)
+	    """
+	    Reset system to iniitial state
+	    """
+	    self.sys.reset(x_0)
+	    self.Fail=False
+	    self.at_boundary=False
+	    self.rollout_values = [0, 0]
+	    self.rollout_data=[]
+	    self.horizon_cost = np.zeros(self.num_it + 1)
 
 	def initialize_gps(self,params):
-
+        
 		for k in params:
 			self.sys.k=k
 			self.simulate()
@@ -184,6 +203,9 @@ class Optimizer(object):
 			self.opt.add_new_data_point(x, y)
 
 	def simulate(self,opt=None,x_0=None):
+		"""
+		Simulate system
+		"""
 		self.reset(x_0)
 		f = -self.sys.state[0] ** 2
 		g = f
@@ -211,6 +233,9 @@ class Optimizer(object):
 			
 			
 	def optimize(self):
+		"""
+		Perform 1 full optimization step
+		"""
 		self.opt.update_boundary_points()
 		start_time = time.time()
 		a = self.opt.optimize()
@@ -249,17 +274,15 @@ class Optimizer(object):
 
 		self.sys.step()
 
-		#if self.at_boundary:
-			#cost = np.asarray([[self.cost_bound/self.num_it]])
-			#constraint = np.asarray([[-self.high**2]])
-			#return cost, constraint
-
 		cost = self.sys.state ** 2
 		constraint = -cost
 
 		return cost, constraint
 
 	def add_data(self,y):
+		"""
+		Add points to GP
+		"""
 		for i,x in enumerate(self.rollout_data):
 			f_value=np.sum(self.horizon_cost[i:])
 			y[0]=f_value
@@ -269,7 +292,10 @@ class Optimizer(object):
 
 
 
-def Optimize():
+def Optimize(num_experiments=2):
+	"""
+	Performs full optimization for num_experiments iterations
+	"""
 
 	plot = True
 	if plot:
@@ -321,7 +347,6 @@ def Optimize():
 	#plt.show()
 	# x=2
 
-	num_experiments = 2
 	opt = Optimizer()
 	x = opt.opt._x
 	y = opt.opt._y
@@ -354,103 +379,12 @@ def Optimize():
 			Reward_data[j,1]=fval[0]
 			Reward_data[j,0]=i
 			j+=1
-
-		if plot_gp_data:
-
-			if prev_plt_indicator<plt_indicator:
-
-				#if np.any(negative_a):
-				#	min_a_neg = np.min(negative_a)
-				#	max_a_neg = np.max(negative_a)
-				#	ax2.axvspan(min_a_neg, max_a_neg, color="red", alpha=0.5)
-
-
-				fig_plot = plt.figure(figsize=(14, 14))
-				left, bottom, width, height = 0.1, 0.1, 0.8, 0.8
-				ax_plot = fig_plot.add_axes([left, bottom, width, height])
-				ax_plot.scatter(opt.opt._x[:,0], opt.opt._x[:,1], c="Darkred", label="Remaining points")
-				ax_plot.scatter(opt.opt.gps[0].X[:,0], opt.opt.gps[0].X[:,1], c="blue",
-								label="GP_data")
-
-				ax_plot.fill(np.asarray([min_pos_a, min_pos_a, max_pos_a, max_pos_a]),
-							 np.asarray([min_state, max_state, max_state, min_state]), color='red',
-							 alpha=0.25)
-
-				if len(safe_plot_neg)>0:
-					ax_plot.fill(np.asarray([min_neg_a, min_neg_a, max_neg_a, max_neg_a]),
-								 np.asarray([min_state, max_state, max_state, min_state]), color='red',
-								 alpha=0.25)
-
-
-				ax_plot.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
-						  fancybox=True, shadow=True, ncol=5,title="Data selection scheme")
-				ax_plot.set_title('All data points and data points in GP')
-				ax_plot.set_xlabel('a')
-				ax_plot.set_ylabel('x')
-				ax_plot.set_xlim([-6.5, 6.5])
-				ax_plot.set_ylim([-0.8, 0.8])
-				name = "Data points in GP after" + str(prev_plt_indicator) + ".png"
-				fig_plot.savefig(name, dpi=300)
-				prev_plt_indicator=plt_indicator
-
-			if opt.opt.gps[0].X.shape[0] - opt.opt.gps[0].X[opt.opt.x_0_idx_gp,:].shape[0]>=opt.opt.data_size_max:
-				bounds = [[-6, 6], [-0.8, 0.8]]
-				parameter_set = linearly_spaced_combinations(bounds, num_samples=50)
-				mean, var = opt.opt.gps[0].predict(parameter_set)
-				std = np.sqrt(var)
-				l_x0 = mean - 2 * std
-				l_x0 = l_x0.squeeze()
-				mean, var = opt.opt.gps[1].predict(parameter_set)
-				std = np.sqrt(var)
-				l_x0_1 = mean - 2 * std
-				l_x0_1 = l_x0_1.squeeze()
-				safe_plot = parameter_set[np.logical_and(l_x0 >= opt.opt.fmin[0], l_x0_1 >= opt.opt.fmin[1]), :]
-				#safe_plot=np.sort(safe_plot, axis=0)
-				safe_plot_pos=safe_plot[safe_plot[:,0]>=0]
-				safe_plot_neg = safe_plot[safe_plot[:, 0] < 0]
-				fig_plot = plt.figure(figsize=(14, 14))
-				left, bottom, width, height = 0.1, 0.1, 0.8, 0.8
-				ax_plot = fig_plot.add_axes([left, bottom, width, height])
-				ax_plot.scatter(opt.opt._x[:,0],opt.opt._x[:,1],c="Darkred",label="Remaining points")
-				ax_plot.scatter(opt.opt.gps[0].X[:,0],opt.opt.gps[0].X[:,1], c="blue", label="GP_data")
-
-				max_state = np.max(safe_plot[:, 1])
-				min_state = np.min(safe_plot[:, 1])
-				max_pos_a = np.max(safe_plot_pos[:, 0])
-				min_pos_a = np.min(safe_plot_pos[:, 0])
-
-				ax_plot.fill(np.asarray([min_pos_a,min_pos_a ,max_pos_a, max_pos_a]), np.asarray([min_state, max_state,max_state, min_state]), color='red',
-							 alpha=0.25)
-
-
-				if len(safe_plot_neg) > 0:
-					max_neg_a = np.max(safe_plot_neg[:, 0])
-					min_neg_a = np.min(safe_plot_neg[:, 0])
-					ax_plot.fill(np.asarray([min_neg_a, min_neg_a,max_neg_a,  max_neg_a]),
-								 np.asarray([min_state, max_state, max_state, min_state]), color='red',
-								 alpha=0.25)
-
-				ax_plot.set_title('All data points and data points in GP')
-
-				ax_plot.legend(loc='upper center', bbox_to_anchor=(0.5, -0.05),
-						  fancybox=True, shadow=True, ncol=5,title="Data selection scheme")
-				ax_plot.set_xlabel('a')
-				ax_plot.set_ylabel('x')
-				ax_plot.set_xlim([-6.5, 6.5])
-				ax_plot.set_ylim([-0.8, 0.8])
-				name="Data points in GP before" + str(plt_indicator)+".png"
-				fig_plot.savefig(name,dpi=300)
-				plt_indicator += 1
-
-
-
 		if plot:
 			df2 = df
 			print(opt.opt.criterion)
 			idx = df2["boundary"] > 0
 			df2.criteria.loc[idx] = "Boundary"
 			if i%30==0:
-			#if i % 30 == 0 or i==140:
 				for c in criterias:
 					ix = np.where(df.criteria == c)[0]
 					ax.scatter(df2.a.iloc[ix], df2.x.iloc[ix], c=colours[c], label=c if i == 0 else "")
@@ -529,9 +463,6 @@ def Optimize():
 		else:
 			print(opt.opt.criterion)
 			df=opt.optimize()
-
-	#opt.optimize()
-	#df.to_csv("GoSafe_mod_sys_200steps.csv", index=False, header=True)
 	np.savetxt("Rewards_gosafe.csv", Reward_data, delimiter=',')
 	print(opt.opt.get_maximum())
 	time_recorder=np.asarray(opt.time_recorded)
@@ -542,16 +473,6 @@ def Optimize():
 
 
 if __name__ == '__main__':
-	# #test_mod_sys()
-	# #single_traj(-6)
-	#
-	# opt = Optimizer(eps=0.1, f_min=-800)
-	# num_experiments=100
-	# for i in range(num_experiments):
-	# 	chec=opt.optimize()
-	# 	print(i)
-
-	#plot_function()
 	start_time = time.time()
 	Optimize()
 	print("--- %s seconds ---" % (time.time() - start_time))
