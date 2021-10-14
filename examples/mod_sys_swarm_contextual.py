@@ -299,7 +299,7 @@ def Optimize(num_experiments=91):
 
 	plot = True
 	if plot:
-		log_dir = "./results_thesis/contextual"
+		log_dir = "./contextual"
 		os.makedirs(log_dir, exist_ok=True)
 		os.chdir(log_dir)
 		Data, F, G = generate_heat_map(n_points=15)
@@ -366,11 +366,7 @@ def Optimize(num_experiments=91):
 	plt_indicator=0
 	prev_plt_indicator=0
 
-	if plot_gp_data and not plot:
-		log_dir = "./results/swarm/M2_debug_standard"
-		os.makedirs(log_dir, exist_ok=True)
-		os.chdir(log_dir)
-	Reward_data=np.zeros([15,2])
+	Reward_data=np.zeros([9,2])
 	j=0
 	for i in range(num_experiments):
 		if i%10==0:
