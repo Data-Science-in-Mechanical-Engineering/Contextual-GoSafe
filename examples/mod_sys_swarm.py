@@ -1,8 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import GPy
-from safeopt import linearly_spaced_combinations
-from safeopt import Contextual_GoSafe
+from gosafeopt import linearly_spaced_combinations
+from gosafeopt import GoSafeOptPractical
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import pandas as pd
@@ -175,7 +175,7 @@ class Optimizer(object):
 
 		# Set up optimizer
 		L_states=L[1]
-		self.opt=Contextual_GoSafe(gp=[gp1, gp2],gp_full=[gp_full1,gp_full2],L_states=L_states,bounds=bounds,fmin=[f_min, -high**2],x_0=np.array([[0]]),eta_L=eta,max_S1_steps=30,max_S3_steps=10,eps=0.1,max_data_size=100,reset_size=20) #worked for maxS2_steps=100
+		self.opt=GoSafeOptPractical(gp=[gp1, gp2],gp_full=[gp_full1,gp_full2],L_states=L_states,bounds=bounds,fmin=[f_min, -high**2],x_0=np.array([[0]]),eta_L=eta,max_S1_steps=30,max_S3_steps=10,eps=0.1,max_data_size=100,reset_size=20) #worked for maxS2_steps=100
 		params = np.linspace(2, 3, 2)
 		self.initialize_gps(params)
 		self.time_recorded=[]
@@ -299,7 +299,7 @@ def Optimize(num_experiments=91):
 
 	plot = True
 	if plot:
-		log_dir = "./contextual"
+		log_dir = "./gosafeopt_results"
 		os.makedirs(log_dir, exist_ok=True)
 		os.chdir(log_dir)
 		Data, F, G = generate_heat_map(n_points=15)
@@ -366,7 +366,7 @@ def Optimize(num_experiments=91):
 	plt_indicator=0
 	prev_plt_indicator=0
 
-	Reward_data=np.zeros([9,2])
+	Reward_data=np.zeros([10,2])
 	j=0
 	for i in range(num_experiments):
 		if i%10==0:

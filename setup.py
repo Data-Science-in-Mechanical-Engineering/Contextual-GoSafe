@@ -11,12 +11,12 @@ with open(path.join(current_dir, 'requirements.txt'), 'r') as f:
     install_requires = f.read().split('\n')
 
 setup(
-    name='safeopt',
+    name='gosafeopt',
     version='0.16',
-    author='Felix Berkenkamp',
-    author_email='befelix@inf.ethz.ch',
-    packages=['safeopt'],
-    url='https://github.com/befelix/SafeOpt',
+    author='Bhavya Sukhija',
+    author_email='sukhijab@ethz.ch',
+    packages=['gosafeopt'],
+    url='https://github.com/Data-Science-in-Mechanical-Engineering/Contextual-GoSafe',
     license='MIT',
     description='Safe Bayesian optimization',
     long_description=long_description,

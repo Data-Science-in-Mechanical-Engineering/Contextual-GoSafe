@@ -24,7 +24,7 @@ from .swarm import SwarmOptimization
 import logging
 
 
-__all__ = ['SafeOpt', 'SafeOptSwarm','Contextual_GoSafe']
+__all__ = ['SafeOpt', 'SafeOptSwarm','GoSafeOptPractical']
 
 
 class GaussianProcessOptimization(object):
@@ -317,8 +317,8 @@ class SafeOpt(GaussianProcessOptimization):
 
     Examples
     --------
-    >>> from safeopt import SafeOpt
-    >>> from safeopt import linearly_spaced_combinations
+    >>> from gosafeopt import SafeOpt
+    >>> from gosafeopt import linearly_spaced_combinations
     >>> import GPy
     >>> import numpy as np
 
@@ -754,7 +754,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
 
     Examples
     --------
-    >>> from safeopt import SafeOptSwarm
+    >>> from gosafeopt import SafeOptSwarm
     >>> import GPy
     >>> import numpy as np
 
@@ -1197,7 +1197,7 @@ class SafeOptSwarm(GaussianProcessOptimization):
         return self.gp.X[maxi, :], self.gp.Y[maxi]
 
 
-class Contextual_GoSafe(SafeOptSwarm):
+class GoSafeOptPractical(SafeOptSwarm):
 
     """GoSafe for larger dimensions using a Swarm Optimization heuristic without exploration in state space.
 
@@ -1269,7 +1269,7 @@ class Contextual_GoSafe(SafeOptSwarm):
 
     Examples
     --------
-    >>> from safeopt import Contextual_GoSafe
+    >>> from gosafeopt import GoSafeOptPractical
     >>> import GPy
     >>> import numpy as np
 
@@ -1301,7 +1301,7 @@ class Contextual_GoSafe(SafeOptSwarm):
         assert len(gp_full) == len(gp), 'Full gp must have the same dimension as the parameter gp'
         self.gp_full=gp_full
         # Initialize all SafeOptSwarm params
-        super(Contextual_GoSafe, self).__init__(gp=gp,
+        super(GoSafeOptPractical, self).__init__(gp=gp,
                                           fmin=fmin,
                                           bounds=bounds,
                                           beta=beta,

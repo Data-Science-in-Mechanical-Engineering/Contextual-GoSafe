@@ -1,9 +1,9 @@
 ====================================
-Contextual GoSafe - Safe Bayesian Optimization
+GoSafeOpt - Safe Bayesian Optimization
 ====================================
 
 
-This repository is the official implementation accompanying the paper "GoSafeCon: Contextual Safe Learning of Global Optima" by Bhavya Sukhija, Matteo Turchetta, David Lindner, Andreas Krause, Sebastian Trimpe, and Dominik Baumann. It builds upon the SafeOpt code provided at https://github.com/befelix/SafeOpt. GoSafeCon is an extension of [1]_ based on particle swarms, as proposed by [2]_, which can be applied for general high dimensional tasks.
+This repository is the official implementation accompanying the paper "GoSafeOpt: Scalable Safe Exploration for Global Optimization of Dynamical Systems" by Bhavya Sukhija, Matteo Turchetta, David Lindner, Andreas Krause, Sebastian Trimpe, and Dominik Baumann. It builds upon the SafeOpt code provided at https://github.com/befelix/SafeOpt. GoSafeOpt is an extension of [1]_ based on particle swarms, as proposed by [2]_, which can be applied for general high dimensional tasks.
 
 
 .. [1] D.Baumann, A.Marco, M.Turchetta, S.Trimpe,
@@ -14,21 +14,20 @@ This repository is the official implementation accompanying the paper "GoSafeCon
   `Constrained Bayesian optimization with Particle Swarms for Safe Adaptive Controller Tuning <http://www.dynsyslab.org/wp-content/papercite-data/pdf/duivenvoorden-ifac17.pdf>`_,
   in Proc. of the IFAC (International Federation of Automatic Control) World Congress, 2017.
 
+  .. [1] B.Sukhija, M.Turchetta, D.Lindner, A.Krause, D.Baumann, S.Trimpe,
+  `GoSafeOpt Scalable Safe Exploration for Global Optimization of Dynamical Systems <https://arxiv.org/abs/2201.09562>`_,
+
 Contributions:
 ---------------
 SafeOpt, SafeOptSwarm developed by Felix Berkenkamp
 
-Contextual_GoSafe developed by Bhavya Sukhija
+GoSafeOpt developed by Bhavya Sukhija
 
 Installation
 ------------
-The easiest way to install the necessary python libraries is by installing pip (e.g. ``apt-get install python-pip`` on Ubuntu) and running
+You can clone the repository and install it using
 
-``pip install safeopt``
-
-Alternatively you can clone the repository and install it using
-
-``python setup.py install``
+``pip install .``
 
 
 License
@@ -42,4 +41,4 @@ Reproducing Results
 
 To reproduce our simulation results, the repository: https://github.com/Data-Science-in-Mechanical-Engineering/franka-emika-panda-simulation is required.
 
-An example of contextual GoSafe on a 1D toy example is also provided in the examples folder.
+An example of GoSafeOpt on a 1D toy example is also provided in the examples folder.

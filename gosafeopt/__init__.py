@@ -1,5 +1,5 @@
 """
-The `safeopt` package implements tools for Safe Bayesian optimization.
+The `gosafeopt` package implements tools for Safe Bayesian optimization.
 
 Main classes
 ------------
@@ -15,6 +15,7 @@ problems by relying on heuristics and adaptive swarm discretization.
 
    SafeOpt
    SafeOptSwarm
+   GoSafeOptPractical
 
 Utilities
 ---------
